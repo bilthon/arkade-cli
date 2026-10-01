@@ -47,10 +47,14 @@ Global flags: `--operator <url>`, `--json`, `--color always|never|auto`
 and a BTC equivalent, and timestamps as UTC with the raw unix value in
 parentheses.
 
-Human-readable output keeps distinct Arkade identifiers clearly labeled:
-`spent by` (the spending/checkpoint transaction reported by the operator) is
-shown separately from `ark txid` (the Arkade transaction). Indexer-reported
-state is **not** independent cryptographic proof, and the output says so.
+Human-readable output keeps distinct Arkade identifiers clearly labeled. Per the
+official SDK semantics, a spent VTXO is described at two layers: `spent by` is
+the **checkpoint transaction** that spends it, and `ark txid` is the **Ark
+transaction** that spends it (without the checkpoint) — both are empty for an
+unspent VTXO. `commitment` lists the ancestor commitment transactions, and
+`settled by` is the commitment transaction the VTXO was forfeited onto.
+Indexer-reported state is **not** independent cryptographic proof, and the
+output says so.
 
 ### Exit codes
 

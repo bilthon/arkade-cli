@@ -125,10 +125,10 @@ pub fn render_human(vtxo: &IndexerVtxo, outpoint: &Outpoint, color: bool) -> Str
          status:      {status}\n  \
          created at:  {created}\n  \
          expires at:  {expires}\n  \
-         spent by:    {spent_by}    (spending/checkpoint tx per operator)\n  \
-         ark txid:    {ark_txid}    (Arkade transaction)\n  \
-         commitment:  {commitment}\n  \
-         settled by:  {settled_by}\n{note}",
+         spent by:    {spent_by}    (checkpoint tx that spends this VTXO)\n  \
+         ark txid:    {ark_txid}    (Ark tx that spends it, without the checkpoint)\n  \
+         commitment:  {commitment}    (ancestor commitment txs)\n  \
+         settled by:  {settled_by}    (commitment tx this VTXO was forfeited onto)\n{note}",
         amount = format_amount(vtxo.amount.as_deref()),
         script = or_dash(vtxo.script.as_deref()),
         status = status_display,
@@ -210,6 +210,16 @@ mod tests {
         assert!(out.contains(SPENT_BY));
         assert!(out.contains(ARK_TXID));
         assert_ne!(SPENT_BY, ARK_TXID);
+    }
+
+    #[test]
+    fn labels_reflect_official_spend_semantics() {
+        let out = render_human(&spent_vtxo(), &outpoint(), false);
+        // spent_by is the checkpoint tx; ark_txid is the Ark tx; both describe the spend.
+        assert!(out.contains("(checkpoint tx that spends this VTXO)"));
+        assert!(out.contains("(Ark tx that spends it, without the checkpoint)"));
+        assert!(out.contains("(ancestor commitment txs)"));
+        assert!(out.contains("(commitment tx this VTXO was forfeited onto)"));
     }
 
     #[test]
