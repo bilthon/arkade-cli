@@ -245,6 +245,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commitment_500_batch_not_found_is_response_error() {
+        let server = MockServer::start().await;
+        let body = r#"{"code":13, "message":"batch not found", "details":[]}"#;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/indexer/commitmentTx/{TXID}")))
+            .respond_with(ResponseTemplate::new(500).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let err = client(&server.uri()).get_commitment_tx(TXID).await.unwrap_err();
+        match err {
+            IndexerError::Response { status, body: actual_body } => {
+                assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(actual_body, body);
+            }
+            other => panic!("expected Response error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn times_out_slow_operator() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
