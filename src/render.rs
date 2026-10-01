@@ -1,6 +1,6 @@
 //! Rendering of indexer VTXO records for humans and machines.
 
-use ark_rest::models::IndexerVtxo;
+use ark_rest::models::{GetCommitmentTxResponse, IndexerVtxo};
 
 use crate::outpoint::Outpoint;
 
@@ -142,9 +142,63 @@ pub fn render_human(vtxo: &IndexerVtxo, outpoint: &Outpoint, color: bool) -> Str
     )
 }
 
-/// Machine-readable rendering: the indexer VTXO as pretty JSON.
-pub fn render_json(vtxo: &IndexerVtxo) -> Result<String, serde_json::Error> {
-    serde_json::to_string_pretty(vtxo)
+/// Machine-readable rendering: any indexer record as pretty JSON.
+pub fn render_json<T: serde::Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(value)
+}
+
+/// Format an optional integer satoshi amount (ark-rest types commitment amounts
+/// as i32) reusing the string amount formatter.
+fn format_amount_i(amount: Option<i32>) -> String {
+    format_amount(amount.map(|v| v.to_string()).as_deref())
+}
+
+fn count_or_dash(n: Option<i32>) -> String {
+    n.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())
+}
+
+/// Human-readable rendering of a commitment transaction.
+pub fn render_commitment_human(resp: &GetCommitmentTxResponse, txid: &str) -> String {
+    let mut out = format!(
+        "Commitment tx {txid}\n  \
+         started:     {started}\n  \
+         ended:       {ended}\n  \
+         inputs:      {in_vtxos} VTXOs, {in_amount}\n  \
+         outputs:     {out_vtxos} VTXOs, {out_amount}\n  \
+         batches:     {nbatches}",
+        started = format_time(resp.started_at.as_deref()),
+        ended = format_time(resp.ended_at.as_deref()),
+        in_vtxos = count_or_dash(resp.total_input_vtxos),
+        in_amount = format_amount_i(resp.total_input_amount),
+        out_vtxos = count_or_dash(resp.total_output_vtxos),
+        out_amount = format_amount_i(resp.total_output_amount),
+        nbatches = resp.batches.as_ref().map(|b| b.len()).unwrap_or(0),
+    );
+
+    if let Some(batches) = resp.batches.as_ref() {
+        // Stable, deterministic ordering by batch id.
+        let mut ids: Vec<&String> = batches.keys().collect();
+        ids.sort();
+        for id in ids {
+            let b = &batches[id];
+            out.push_str(&format!(
+                "\n    {id}: {vtxos} VTXOs, {amount}, expires {expires}, swept {swept}",
+                vtxos = count_or_dash(b.total_output_vtxos),
+                amount = format_amount_i(b.total_output_amount),
+                expires = format_time(b.expires_at.as_deref()),
+                swept = b.swept.unwrap_or(false),
+            ));
+        }
+    }
+
+    out.push('\n');
+    out.push_str(INDEXER_NOTE);
+    out
+}
+
+/// Message shown when the indexer has no such commitment transaction.
+pub fn render_commitment_not_found(txid: &str) -> String {
+    format!("No commitment transaction {txid} found at the selected operator.")
 }
 
 /// Message shown when the indexer has no record of the outpoint.
@@ -297,5 +351,57 @@ mod tests {
     #[test]
     fn not_found_names_the_outpoint() {
         assert!(render_not_found(&outpoint()).contains(&outpoint().to_string()));
+    }
+
+    fn commitment() -> GetCommitmentTxResponse {
+        serde_json::from_value(serde_json::json!({
+            "startedAt": "100",
+            "endedAt": "200",
+            "totalInputAmount": 1200000,
+            "totalInputVtxos": 12,
+            "totalOutputAmount": 1199000,
+            "totalOutputVtxos": 12,
+            "batches": {
+                "b1": { "expiresAt": "300", "swept": false, "totalOutputAmount": 1199000, "totalOutputVtxos": 12 }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn commitment_human_shows_totals_and_times() {
+        let out = render_commitment_human(&commitment(), TXID);
+        assert!(out.contains(&format!("Commitment tx {TXID}")));
+        assert!(out.contains("inputs:      12 VTXOs, 1,200,000 sat (0.01200000 BTC)"));
+        assert!(out.contains("outputs:     12 VTXOs, 1,199,000 sat (0.01199000 BTC)"));
+        assert!(out.contains("started:     1970-01-01 00:01:40 UTC (100)"));
+        assert!(out.contains("not independent cryptographic proof"));
+    }
+
+    #[test]
+    fn commitment_human_lists_batches() {
+        let out = render_commitment_human(&commitment(), TXID);
+        assert!(out.contains("batches:     1"));
+        assert!(out.contains("b1: 12 VTXOs, 1,199,000 sat (0.01199000 BTC), expires 1970-01-01 00:05:00 UTC (300), swept false"));
+    }
+
+    #[test]
+    fn commitment_handles_empty_and_missing() {
+        let bare: GetCommitmentTxResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+        let out = render_commitment_human(&bare, TXID);
+        assert!(out.contains("inputs:      - VTXOs, -"));
+        assert!(out.contains("batches:     0"));
+    }
+
+    #[test]
+    fn commitment_not_found_names_txid() {
+        assert!(render_commitment_not_found(TXID).contains(TXID));
+    }
+
+    #[test]
+    fn json_is_generic_over_records() {
+        let json = render_json(&commitment()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["totalInputVtxos"], 12);
     }
 }
