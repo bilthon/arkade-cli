@@ -21,6 +21,7 @@ toml = "0.8"
 directories = "5"
 anyhow = "1"
 thiserror = "1"
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 ark-rest = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567" }
 

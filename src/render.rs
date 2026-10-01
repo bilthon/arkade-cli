@@ -14,6 +14,23 @@ fn or_dash(value: Option<&str>) -> &str {
     }
 }
 
+/// Format an optional unix-timestamp field as a human-readable UTC time with the
+/// raw timestamp in parentheses. Missing values render as `-`; values that are
+/// not an integer are passed through unchanged (we do not guess their meaning).
+fn format_time(raw: Option<&str>) -> String {
+    let raw = match raw {
+        Some(v) if !v.is_empty() => v,
+        _ => return "-".to_string(),
+    };
+    match raw.parse::<i64>() {
+        Ok(secs) => match chrono::DateTime::from_timestamp(secs, 0) {
+            Some(dt) => format!("{} ({raw})", dt.format("%Y-%m-%d %H:%M:%S UTC")),
+            None => raw.to_string(),
+        },
+        Err(_) => raw.to_string(),
+    }
+}
+
 /// Compose the status line from the VTXO's boolean flags.
 fn status(vtxo: &IndexerVtxo) -> String {
     let mut flags = Vec::new();
@@ -57,8 +74,8 @@ pub fn render_human(vtxo: &IndexerVtxo, outpoint: &Outpoint) -> String {
         amount = or_dash(vtxo.amount.as_deref()),
         script = or_dash(vtxo.script.as_deref()),
         status = status(vtxo),
-        created = or_dash(vtxo.created_at.as_deref()),
-        expires = or_dash(vtxo.expires_at.as_deref()),
+        created = format_time(vtxo.created_at.as_deref()),
+        expires = format_time(vtxo.expires_at.as_deref()),
         spent_by = or_dash(vtxo.spent_by.as_deref()),
         ark_txid = or_dash(vtxo.ark_txid.as_deref()),
         commitment = commitment,
@@ -149,6 +166,29 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["amount"], "1500");
         assert_eq!(parsed["spentBy"], SPENT_BY);
+    }
+
+    #[test]
+    fn formats_unix_timestamp_as_utc_with_raw_in_parens() {
+        assert_eq!(format_time(Some("100")), "1970-01-01 00:01:40 UTC (100)");
+    }
+
+    #[test]
+    fn format_time_missing_is_dash() {
+        assert_eq!(format_time(None), "-");
+        assert_eq!(format_time(Some("")), "-");
+    }
+
+    #[test]
+    fn format_time_passes_through_non_numeric() {
+        assert_eq!(format_time(Some("2026-10-01T00:00:00Z")), "2026-10-01T00:00:00Z");
+    }
+
+    #[test]
+    fn human_shows_utc_time_for_created_and_expires() {
+        let out = render_human(&spent_vtxo(), &outpoint());
+        assert!(out.contains("created at:  1970-01-01 00:01:40 UTC (100)"));
+        assert!(out.contains("expires at:  1970-01-01 00:03:20 UTC (200)"));
     }
 
     #[test]
