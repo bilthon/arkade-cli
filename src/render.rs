@@ -14,6 +14,36 @@ fn or_dash(value: Option<&str>) -> &str {
     }
 }
 
+/// Insert thousands separators into a non-negative integer string.
+fn with_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
+/// Format an optional satoshi amount as `<1,234> sat (<0.00001234> BTC)`.
+/// Missing values render as `-`; non-integer values pass through unchanged.
+fn format_amount(raw: Option<&str>) -> String {
+    let raw = match raw {
+        Some(v) if !v.is_empty() => v,
+        _ => return "-".to_string(),
+    };
+    match raw.parse::<u64>() {
+        Ok(sats) => {
+            let btc = format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000);
+            format!("{} sat ({btc} BTC)", with_thousands(sats))
+        }
+        Err(_) => raw.to_string(),
+    }
+}
+
 /// Format an optional unix-timestamp field as a human-readable UTC time with the
 /// raw timestamp in parentheses. Missing values render as `-`; values that are
 /// not an integer are passed through unchanged (we do not guess their meaning).
@@ -71,7 +101,7 @@ pub fn render_human(vtxo: &IndexerVtxo, outpoint: &Outpoint) -> String {
          ark txid:    {ark_txid}    (Arkade transaction)\n  \
          commitment:  {commitment}\n  \
          settled by:  {settled_by}\n{note}",
-        amount = or_dash(vtxo.amount.as_deref()),
+        amount = format_amount(vtxo.amount.as_deref()),
         script = or_dash(vtxo.script.as_deref()),
         status = status(vtxo),
         created = format_time(vtxo.created_at.as_deref()),
@@ -124,8 +154,22 @@ mod tests {
     #[test]
     fn human_shows_amount_and_script() {
         let out = render_human(&spent_vtxo(), &outpoint());
-        assert!(out.contains("1500 sat"));
+        assert!(out.contains("1,500 sat"));
         assert!(out.contains("0014deadbeef"));
+    }
+
+    #[test]
+    fn format_amount_adds_thousands_and_btc() {
+        assert_eq!(format_amount(Some("1500")), "1,500 sat (0.00001500 BTC)");
+        assert_eq!(format_amount(Some("100000000")), "100,000,000 sat (1.00000000 BTC)");
+        assert_eq!(format_amount(Some("0")), "0 sat (0.00000000 BTC)");
+    }
+
+    #[test]
+    fn format_amount_missing_and_non_numeric() {
+        assert_eq!(format_amount(None), "-");
+        assert_eq!(format_amount(Some("")), "-");
+        assert_eq!(format_amount(Some("abc")), "abc");
     }
 
     #[test]
