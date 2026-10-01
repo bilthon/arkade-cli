@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 
 use arkade_cli::config;
 use arkade_cli::indexer::IndexerClient;
-use arkade_cli::outpoint::Outpoint;
+use arkade_cli::outpoint::{self, Outpoint};
 use arkade_cli::render;
 
 /// akcli — a read-only explorer for Arkade virtual transactions and outputs.
@@ -39,6 +39,11 @@ enum Command {
     Vtxo {
         /// Outpoint in the form <txid>:<vout>.
         outpoint: String,
+    },
+    /// Inspect a commitment transaction by txid.
+    Tx {
+        /// Commitment transaction id (64 hex chars).
+        txid: String,
     },
 }
 
@@ -88,6 +93,28 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         println!("{}", render::render_not_found(&outpoint));
                     }
                     // Not found is a clean "no record" answer, not a failure.
+                    Ok(ExitCode::from(2))
+                }
+            }
+        }
+        Command::Tx { txid } => {
+            outpoint::validate_txid(&txid)?;
+            let client = IndexerClient::new(&operator, Duration::from_secs(cli.timeout))?;
+            match client.get_commitment_tx(&txid).await? {
+                Some(resp) => {
+                    if cli.json {
+                        println!("{}", render::render_json(&resp)?);
+                    } else {
+                        println!("{}", render::render_commitment_human(&resp, &txid));
+                    }
+                    Ok(ExitCode::SUCCESS)
+                }
+                None => {
+                    if cli.json {
+                        println!("null");
+                    } else {
+                        println!("{}", render::render_commitment_not_found(&txid));
+                    }
                     Ok(ExitCode::from(2))
                 }
             }

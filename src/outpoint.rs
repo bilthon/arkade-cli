@@ -23,6 +23,17 @@ pub enum OutpointParseError {
     InvalidVout(String),
 }
 
+/// Validate that `txid` is 64 lowercase hexadecimal characters.
+pub fn validate_txid(txid: &str) -> Result<(), OutpointParseError> {
+    if txid.len() != 64 {
+        return Err(OutpointParseError::TxidLength(txid.len()));
+    }
+    if !txid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(OutpointParseError::TxidNotHex);
+    }
+    Ok(())
+}
+
 impl Outpoint {
     /// Parse an outpoint from `<txid>:<vout>`.
     pub fn parse(input: &str) -> Result<Self, OutpointParseError> {
@@ -30,12 +41,7 @@ impl Outpoint {
             .rsplit_once(':')
             .ok_or(OutpointParseError::MissingSeparator)?;
 
-        if txid.len() != 64 {
-            return Err(OutpointParseError::TxidLength(txid.len()));
-        }
-        if !txid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
-            return Err(OutpointParseError::TxidNotHex);
-        }
+        validate_txid(txid)?;
 
         let vout: u32 = vout
             .parse()
@@ -116,6 +122,16 @@ mod tests {
         let upper = TXID.to_uppercase();
         assert_eq!(
             Outpoint::parse(&format!("{upper}:0")).unwrap_err(),
+            OutpointParseError::TxidNotHex
+        );
+    }
+
+    #[test]
+    fn validate_txid_accepts_and_rejects() {
+        assert!(validate_txid(TXID).is_ok());
+        assert_eq!(validate_txid("abcd").unwrap_err(), OutpointParseError::TxidLength(4));
+        assert_eq!(
+            validate_txid(&TXID.to_uppercase()).unwrap_err(),
             OutpointParseError::TxidNotHex
         );
     }

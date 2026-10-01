@@ -41,6 +41,19 @@ akcli --color never vtxo <txid>:<vout>
 akcli --timeout 5 vtxo <txid>:<vout>
 ```
 
+Inspect a commitment transaction (the on-chain batch) by txid:
+
+```sh
+akcli tx <commitment-txid>
+akcli --json tx <commitment-txid>
+```
+
+The `commitment:` field shown by `akcli vtxo` is a commitment txid you can feed
+straight into `akcli tx`. `tx` shows input/output amounts and VTXO counts, batch
+timing, and per-batch expiry/swept state. Resolving virtual/ark transactions
+(the `arkTxid`/`spentBy` identifiers) needs proof-of-ownership and transaction
+decoding, and is not implemented yet.
+
 Global flags: `--operator <url>`, `--json`, `--color always|never|auto`
 (default `auto`: colors only on a TTY and honors `NO_COLOR`), and
 `--timeout <seconds>` (default 10). Amounts are shown with thousands separators
@@ -66,9 +79,9 @@ output says so.
 
 ## Status
 
-First milestone: inspect one VTXO and show where it went. Full transaction
-decoding, address-to-script conversion, and ancestry tracing are follow-on
-ideas, not implemented yet.
+Implemented: inspect one VTXO (`vtxo`) and one commitment transaction (`tx`).
+Virtual/ark transaction decoding, address-to-script conversion, and ancestry
+tracing are follow-on ideas, not implemented yet.
 
 Built on the official [Arkade Rust SDK](https://github.com/arkade-os/rust-sdk)
 (`ark-rest`).
