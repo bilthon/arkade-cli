@@ -1,9 +1,9 @@
 //! Thin read-only wrapper over the Arkade operator indexer, via `ark-rest`.
 
 use ark_rest::apis::configuration::Configuration;
-use ark_rest::apis::indexer_service_api::{self, IndexerServiceGetVtxosError};
+use ark_rest::apis::indexer_service_api;
 use ark_rest::apis::Error as ArkRestError;
-use ark_rest::models::IndexerVtxo;
+use ark_rest::models::{GetCommitmentTxResponse, IndexerVtxo};
 
 use std::time::Duration;
 
@@ -62,9 +62,26 @@ impl IndexerClient {
 
         Ok(response.vtxos.and_then(|mut v| if v.is_empty() { None } else { Some(v.remove(0)) }))
     }
+
+    /// Fetch the commitment transaction `txid`, or `Ok(None)` if the indexer has
+    /// no such commitment (HTTP 404).
+    pub async fn get_commitment_tx(
+        &self,
+        txid: &str,
+    ) -> Result<Option<GetCommitmentTxResponse>, IndexerError> {
+        match indexer_service_api::indexer_service_get_commitment_tx(&self.config, txid).await {
+            Ok(resp) => Ok(Some(resp)),
+            Err(ArkRestError::ResponseError(rc))
+                if rc.status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(map_err(e)),
+        }
+    }
 }
 
-fn map_err(err: ArkRestError<IndexerServiceGetVtxosError>) -> IndexerError {
+fn map_err<T>(err: ArkRestError<T>) -> IndexerError {
     match err {
         ArkRestError::Reqwest(e) => IndexerError::Transport(e.to_string()),
         ArkRestError::Io(e) => IndexerError::Transport(e.to_string()),
@@ -160,6 +177,51 @@ mod tests {
             .await;
         // Only matches (and returns 200) if the User-Agent header is present.
         assert!(client(&server.uri()).get_vtxo(&outpoint()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn returns_commitment_tx_when_present() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "startedAt": "100",
+            "endedAt": "200",
+            "totalInputAmount": 1200000,
+            "totalInputVtxos": 12,
+            "totalOutputAmount": 1199000,
+            "totalOutputVtxos": 12,
+            "batches": {}
+        });
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/indexer/commitmentTx/{TXID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let resp = client(&server.uri()).get_commitment_tx(TXID).await.unwrap().unwrap();
+        assert_eq!(resp.total_input_vtxos, Some(12));
+        assert_eq!(resp.total_output_amount, Some(1199000));
+    }
+
+    #[tokio::test]
+    async fn commitment_404_is_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/indexer/commitmentTx/{TXID}")))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        assert!(client(&server.uri()).get_commitment_tx(TXID).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn commitment_500_is_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/indexer/commitmentTx/{TXID}")))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let err = client(&server.uri()).get_commitment_tx(TXID).await.unwrap_err();
+        assert!(matches!(err, IndexerError::Response { .. }));
     }
 
     #[tokio::test]
