@@ -3,3 +3,4 @@
 pub mod config;
 pub mod indexer;
 pub mod outpoint;
+pub mod render;
