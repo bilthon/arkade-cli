@@ -120,7 +120,7 @@ pub fn render_human(vtxo: &IndexerVtxo, outpoint: &Outpoint, color: bool) -> Str
 
     format!(
         "VTXO {outpoint}\n  \
-         amount:      {amount} sat\n  \
+         amount:      {amount}\n  \
          script:      {script}\n  \
          status:      {status}\n  \
          created at:  {created}\n  \
@@ -182,7 +182,8 @@ mod tests {
     #[test]
     fn human_shows_amount_and_script() {
         let out = render_human(&spent_vtxo(), &outpoint(), false);
-        assert!(out.contains("1,500 sat"));
+        assert!(out.contains("amount:      1,500 sat (0.00001500 BTC)\n"));
+        assert!(!out.contains("BTC) sat")); // no duplicated unit
         assert!(out.contains("0014deadbeef"));
     }
 
