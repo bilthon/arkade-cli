@@ -7,6 +7,30 @@ use crate::outpoint::Outpoint;
 const INDEXER_NOTE: &str =
     "Note: values reported by the operator indexer; not independent cryptographic proof.";
 
+const GREEN: &str = "\x1b[32m";
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
+
+/// Decide whether to emit ANSI color, given an optional `--color` mode
+/// (`always`/`never`/`auto`), whether `NO_COLOR` is set, and whether stdout is a
+/// terminal. `auto` (or an unknown/absent mode) colors only on a TTY without
+/// `NO_COLOR`.
+pub fn should_color(mode: Option<&str>, no_color_env: bool, is_tty: bool) -> bool {
+    match mode {
+        Some("always") => true,
+        Some("never") => false,
+        _ => is_tty && !no_color_env,
+    }
+}
+
+fn paint(enabled: bool, code: &str, text: &str) -> String {
+    if enabled {
+        format!("{code}{text}{RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
 fn or_dash(value: Option<&str>) -> &str {
     match value {
         Some(v) if !v.is_empty() => v,
@@ -81,8 +105,12 @@ fn status(vtxo: &IndexerVtxo) -> String {
     flags.join(", ")
 }
 
-/// Human-readable, labeled rendering of a VTXO.
-pub fn render_human(vtxo: &IndexerVtxo, outpoint: &Outpoint) -> String {
+/// Human-readable, labeled rendering of a VTXO. `color` enables ANSI coloring
+/// of the status value.
+pub fn render_human(vtxo: &IndexerVtxo, outpoint: &Outpoint, color: bool) -> String {
+    let spent = vtxo.is_spent.unwrap_or(false);
+    let status_code = if spent { RED } else { GREEN };
+    let status_display = paint(color, status_code, &status(vtxo));
     let commitment = vtxo
         .commitment_txids
         .as_ref()
@@ -103,7 +131,7 @@ pub fn render_human(vtxo: &IndexerVtxo, outpoint: &Outpoint) -> String {
          settled by:  {settled_by}\n{note}",
         amount = format_amount(vtxo.amount.as_deref()),
         script = or_dash(vtxo.script.as_deref()),
-        status = status(vtxo),
+        status = status_display,
         created = format_time(vtxo.created_at.as_deref()),
         expires = format_time(vtxo.expires_at.as_deref()),
         spent_by = or_dash(vtxo.spent_by.as_deref()),
@@ -153,7 +181,7 @@ mod tests {
 
     #[test]
     fn human_shows_amount_and_script() {
-        let out = render_human(&spent_vtxo(), &outpoint());
+        let out = render_human(&spent_vtxo(), &outpoint(), false);
         assert!(out.contains("1,500 sat"));
         assert!(out.contains("0014deadbeef"));
     }
@@ -174,7 +202,7 @@ mod tests {
 
     #[test]
     fn human_distinguishes_spent_by_from_ark_txid() {
-        let out = render_human(&spent_vtxo(), &outpoint());
+        let out = render_human(&spent_vtxo(), &outpoint(), false);
         // Both identifiers appear, under distinct labels, and are not collapsed.
         assert!(out.contains("spent by:"));
         assert!(out.contains("ark txid:"));
@@ -185,12 +213,12 @@ mod tests {
 
     #[test]
     fn human_marks_spent_status() {
-        assert!(render_human(&spent_vtxo(), &outpoint()).contains("status:      spent"));
+        assert!(render_human(&spent_vtxo(), &outpoint(), false).contains("status:      spent"));
     }
 
     #[test]
     fn human_includes_indexer_provenance_note() {
-        assert!(render_human(&spent_vtxo(), &outpoint()).contains("not independent cryptographic proof"));
+        assert!(render_human(&spent_vtxo(), &outpoint(), false).contains("not independent cryptographic proof"));
     }
 
     #[test]
@@ -199,7 +227,7 @@ mod tests {
             "outpoint": { "txid": TXID, "vout": 0 }
         }))
         .unwrap();
-        let out = render_human(&bare, &outpoint());
+        let out = render_human(&bare, &outpoint(), false);
         assert!(out.contains("spent by:    -"));
         assert!(out.contains("status:      unspent"));
     }
@@ -230,9 +258,29 @@ mod tests {
 
     #[test]
     fn human_shows_utc_time_for_created_and_expires() {
-        let out = render_human(&spent_vtxo(), &outpoint());
+        let out = render_human(&spent_vtxo(), &outpoint(), false);
         assert!(out.contains("created at:  1970-01-01 00:01:40 UTC (100)"));
         assert!(out.contains("expires at:  1970-01-01 00:03:20 UTC (200)"));
+    }
+
+    #[test]
+    fn should_color_modes() {
+        assert!(should_color(Some("always"), true, false));
+        assert!(!should_color(Some("never"), false, true));
+        assert!(should_color(Some("auto"), false, true));
+        assert!(!should_color(Some("auto"), true, true)); // NO_COLOR wins
+        assert!(!should_color(Some("auto"), false, false)); // not a TTY
+        assert!(!should_color(None, false, false));
+        assert!(should_color(None, false, true));
+    }
+
+    #[test]
+    fn color_wraps_status_value_only_when_enabled() {
+        let colored = render_human(&spent_vtxo(), &outpoint(), true);
+        let plain = render_human(&spent_vtxo(), &outpoint(), false);
+        assert!(colored.contains("\x1b[31m")); // spent -> red
+        assert!(colored.contains("\x1b[0m"));
+        assert!(!plain.contains("\x1b["));
     }
 
     #[test]

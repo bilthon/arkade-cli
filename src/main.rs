@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -18,6 +19,10 @@ struct Cli {
     /// Emit machine-readable JSON instead of a human-readable report.
     #[arg(long, global = true)]
     json: bool,
+
+    /// Colorize output: always, never, or auto (default; TTY-only, honors NO_COLOR).
+    #[arg(long, global = true, default_value = "auto", value_parser = ["always", "never", "auto"])]
+    color: String,
 
     #[command(subcommand)]
     command: Command,
@@ -62,7 +67,12 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     if cli.json {
                         println!("{}", render::render_json(&vtxo)?);
                     } else {
-                        println!("{}", render::render_human(&vtxo, &outpoint));
+                        let color = render::should_color(
+                            Some(cli.color.as_str()),
+                            std::env::var_os("NO_COLOR").is_some(),
+                            std::io::stdout().is_terminal(),
+                        );
+                        println!("{}", render::render_human(&vtxo, &outpoint, color));
                     }
                     Ok(ExitCode::SUCCESS)
                 }
