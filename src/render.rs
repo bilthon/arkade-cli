@@ -1,7 +1,8 @@
 //! Rendering of indexer VTXO records for humans and machines.
 
-use ark_rest::models::{GetCommitmentTxResponse, IndexerVtxo};
+use ark_rest::models::IndexerVtxo;
 
+use crate::commitment::CommitmentTx;
 use crate::outpoint::Outpoint;
 
 const INDEXER_NOTE: &str =
@@ -147,18 +148,12 @@ pub fn render_json<T: serde::Serialize>(value: &T) -> Result<String, serde_json:
     serde_json::to_string_pretty(value)
 }
 
-/// Format an optional integer satoshi amount (ark-rest types commitment amounts
-/// as i32) reusing the string amount formatter.
-fn format_amount_i(amount: Option<i32>) -> String {
-    format_amount(amount.map(|v| v.to_string()).as_deref())
-}
-
-fn count_or_dash(n: Option<i32>) -> String {
+fn count_or_dash(n: Option<i64>) -> String {
     n.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())
 }
 
 /// Human-readable rendering of a commitment transaction.
-pub fn render_commitment_human(resp: &GetCommitmentTxResponse, txid: &str) -> String {
+pub fn render_commitment_human(resp: &CommitmentTx, txid: &str) -> String {
     let mut out = format!(
         "Commitment tx {txid}\n  \
          started:     {started}\n  \
@@ -169,9 +164,9 @@ pub fn render_commitment_human(resp: &GetCommitmentTxResponse, txid: &str) -> St
         started = format_time(resp.started_at.as_deref()),
         ended = format_time(resp.ended_at.as_deref()),
         in_vtxos = count_or_dash(resp.total_input_vtxos),
-        in_amount = format_amount_i(resp.total_input_amount),
+        in_amount = format_amount(resp.total_input_amount.as_deref()),
         out_vtxos = count_or_dash(resp.total_output_vtxos),
-        out_amount = format_amount_i(resp.total_output_amount),
+        out_amount = format_amount(resp.total_output_amount.as_deref()),
         nbatches = resp.batches.as_ref().map(|b| b.len()).unwrap_or(0),
     );
 
@@ -184,7 +179,7 @@ pub fn render_commitment_human(resp: &GetCommitmentTxResponse, txid: &str) -> St
             out.push_str(&format!(
                 "\n    {id}: {vtxos} VTXOs, {amount}, expires {expires}, swept {swept}",
                 vtxos = count_or_dash(b.total_output_vtxos),
-                amount = format_amount_i(b.total_output_amount),
+                amount = format_amount(b.total_output_amount.as_deref()),
                 expires = format_time(b.expires_at.as_deref()),
                 swept = b.swept.unwrap_or(false),
             ));
@@ -353,16 +348,17 @@ mod tests {
         assert!(render_not_found(&outpoint()).contains(&outpoint().to_string()));
     }
 
-    fn commitment() -> GetCommitmentTxResponse {
+    fn commitment() -> CommitmentTx {
+        // Amounts as strings, mirroring the real operator (proto uint64 -> JSON string).
         serde_json::from_value(serde_json::json!({
             "startedAt": "100",
             "endedAt": "200",
-            "totalInputAmount": 1200000,
+            "totalInputAmount": "1200000",
             "totalInputVtxos": 12,
-            "totalOutputAmount": 1199000,
+            "totalOutputAmount": "1199000",
             "totalOutputVtxos": 12,
             "batches": {
-                "b1": { "expiresAt": "300", "swept": false, "totalOutputAmount": 1199000, "totalOutputVtxos": 12 }
+                "b1": { "expiresAt": "300", "swept": false, "totalOutputAmount": "1199000", "totalOutputVtxos": 12 }
             }
         }))
         .unwrap()
@@ -387,7 +383,7 @@ mod tests {
 
     #[test]
     fn commitment_handles_empty_and_missing() {
-        let bare: GetCommitmentTxResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+        let bare: CommitmentTx = serde_json::from_value(serde_json::json!({})).unwrap();
         let out = render_commitment_human(&bare, TXID);
         assert!(out.contains("inputs:      - VTXOs, -"));
         assert!(out.contains("batches:     0"));

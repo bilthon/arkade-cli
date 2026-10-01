@@ -3,10 +3,11 @@
 use ark_rest::apis::configuration::Configuration;
 use ark_rest::apis::indexer_service_api;
 use ark_rest::apis::Error as ArkRestError;
-use ark_rest::models::{GetCommitmentTxResponse, IndexerVtxo};
+use ark_rest::models::IndexerVtxo;
 
 use std::time::Duration;
 
+use crate::commitment::CommitmentTx;
 use crate::outpoint::Outpoint;
 
 /// User-Agent sent to the operator, e.g. `akcli/0.1.0`.
@@ -65,19 +66,37 @@ impl IndexerClient {
 
     /// Fetch the commitment transaction `txid`, or `Ok(None)` if the indexer has
     /// no such commitment (HTTP 404).
+    ///
+    /// We issue this request ourselves instead of using ark-rest's generated
+    /// method: the operator serializes `uint64` amounts as JSON strings, but the
+    /// generated `GetCommitmentTxResponse` types them as `i32`, so its decode
+    /// fails. Our [`CommitmentTx`] model accepts strings or numbers.
     pub async fn get_commitment_tx(
         &self,
         txid: &str,
-    ) -> Result<Option<GetCommitmentTxResponse>, IndexerError> {
-        match indexer_service_api::indexer_service_get_commitment_tx(&self.config, txid).await {
-            Ok(resp) => Ok(Some(resp)),
-            Err(ArkRestError::ResponseError(rc))
-                if rc.status == reqwest::StatusCode::NOT_FOUND =>
-            {
-                Ok(None)
-            }
-            Err(e) => Err(map_err(e)),
+    ) -> Result<Option<CommitmentTx>, IndexerError> {
+        let url = format!("{}/v1/indexer/commitmentTx/{txid}", self.config.base_path);
+        let resp = self
+            .config
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| IndexerError::Transport(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
         }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| IndexerError::Transport(e.to_string()))?;
+        if !status.is_success() {
+            return Err(IndexerError::Response { status, body });
+        }
+        serde_json::from_str(&body)
+            .map(Some)
+            .map_err(|e| IndexerError::Malformed(e.to_string()))
     }
 }
 
@@ -182,12 +201,13 @@ mod tests {
     #[tokio::test]
     async fn returns_commitment_tx_when_present() {
         let server = MockServer::start().await;
+        // Amounts as strings, as the real operator returns them (proto uint64).
         let body = serde_json::json!({
             "startedAt": "100",
             "endedAt": "200",
-            "totalInputAmount": 1200000,
+            "totalInputAmount": "147992953",
             "totalInputVtxos": 12,
-            "totalOutputAmount": 1199000,
+            "totalOutputAmount": "147000000",
             "totalOutputVtxos": 12,
             "batches": {}
         });
@@ -198,7 +218,7 @@ mod tests {
             .await;
         let resp = client(&server.uri()).get_commitment_tx(TXID).await.unwrap().unwrap();
         assert_eq!(resp.total_input_vtxos, Some(12));
-        assert_eq!(resp.total_output_amount, Some(1199000));
+        assert_eq!(resp.total_output_amount.as_deref(), Some("147000000"));
     }
 
     #[tokio::test]
