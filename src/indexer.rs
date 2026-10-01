@@ -1,9 +1,9 @@
 //! Thin read-only wrapper over the Arkade operator indexer, via `ark-rest`.
 
 use ark_rest::apis::configuration::Configuration;
-use ark_rest::apis::indexer_service_api;
+use ark_rest::apis::{ark_service_api, indexer_service_api};
 use ark_rest::apis::Error as ArkRestError;
-use ark_rest::models::IndexerVtxo;
+use ark_rest::models::{GetInfoResponse, IndexerVtxo};
 
 use std::time::Duration;
 
@@ -48,6 +48,13 @@ impl IndexerClient {
             ..Configuration::new()
         };
         Ok(Self { config })
+    }
+
+    /// Fetch operator information. All HTTP failures, including 404, are errors.
+    pub async fn get_info(&self) -> Result<GetInfoResponse, IndexerError> {
+        ark_service_api::ark_service_get_info(&self.config)
+            .await
+            .map_err(map_err)
     }
 
     /// Fetch the VTXO at `outpoint`, or `Ok(None)` if the indexer has no record.
@@ -120,6 +127,75 @@ mod tests {
 
     fn client(uri: &str) -> IndexerClient {
         IndexerClient::new(uri, Duration::from_secs(5)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn info_get_preserves_protobuf_strings_and_sends_user_agent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/info"))
+            .and(header_regex("user-agent", "^akcli/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "0.9.0", "network": "bitcoin", "signerPubkey": "02abcd",
+                "utxoMaxAmount": "5000000000", "vtxoMaxAmount": "-1", "dust": "330",
+                "sessionDuration": "30", "boardingExitDelay": "1024"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let info = client(&server.uri()).get_info().await.unwrap();
+        assert_eq!(info.utxo_max_amount.as_deref(), Some("5000000000"));
+        assert_eq!(info.vtxo_max_amount.as_deref(), Some("-1"));
+        assert_eq!(info.network.as_deref(), Some("bitcoin"));
+    }
+
+    #[tokio::test]
+    async fn info_http_errors_preserve_status_and_body_including_404() {
+        for status in [404, 500] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/info"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("operator failure"))
+                .mount(&server)
+                .await;
+            match client(&server.uri()).get_info().await.unwrap_err() {
+                IndexerError::Response { status: actual, body } => {
+                    assert_eq!(actual.as_u16(), status);
+                    assert_eq!(body, "operator failure");
+                }
+                other => panic!("expected HTTP error, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn info_malformed_response_is_error() {
+        for body in ["not json", r#"{"dust":330}"#] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/info"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+            assert!(matches!(
+                client(&server.uri()).get_info().await.unwrap_err(),
+                IndexerError::Malformed(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn info_honors_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/info"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({}))
+                .set_delay(Duration::from_millis(400)))
+            .mount(&server)
+            .await;
+        let client = IndexerClient::new(&server.uri(), Duration::from_millis(50)).unwrap();
+        assert!(matches!(client.get_info().await.unwrap_err(), IndexerError::Transport(_)));
     }
 
     const TXID: &str = "aa11bb22cc33dd44ee55ff66778899001122334455667788990011223344abcd";

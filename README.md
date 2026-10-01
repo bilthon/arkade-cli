@@ -31,6 +31,22 @@ operator = "http://localhost:7071"
 
 ## Usage
 
+Inspect the selected operator's information and policy:
+
+```sh
+akcli info
+akcli info --operator http://localhost:7071
+akcli --json info
+```
+
+`info` reads `/v1/info` and reports version, network, public signer, amount limits,
+fees, and scheduling/delay values. Fees are shown verbatim, without evaluation or
+assumed units; timing fields labeled `raw` have no inferred units. Missing values
+are `-`; maximum `-1` means unlimited, and UTXO maximum `0` means boarding disabled.
+These are operator-reported values, not independently verified. JSON serializes
+SDK-known fields (including nested fees), not raw response bytes or unknown fields.
+HTTP 404 is an error (exit 1), not a missing indexer record.
+
 Inspect a single VTXO by outpoint:
 
 ```sh
@@ -73,13 +89,14 @@ output says so.
 
 | Code | Meaning |
 | ---- | ------- |
-| 0 | VTXO found and printed |
+| 0 | Requested information or record printed |
 | 1 | Error (bad input, missing operator, transport/HTTP failure) |
-| 2 | No VTXO found for the outpoint at the selected operator |
+| 2 | No VTXO or commitment transaction found at the selected operator |
 
 ## Status
 
-Implemented: inspect one VTXO (`vtxo`) and one commitment transaction (`tx`).
+Implemented: operator information (`info`), one VTXO (`vtxo`), and one commitment
+transaction (`tx`).
 Virtual/ark transaction decoding, address-to-script conversion, and ancestry
 tracing are follow-on ideas, not implemented yet.
 

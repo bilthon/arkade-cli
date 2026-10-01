@@ -35,6 +35,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Show operator information and policy.
+    Info,
     /// Inspect a single VTXO by outpoint (<txid>:<vout>).
     Vtxo {
         /// Outpoint in the form <txid>:<vout>.
@@ -69,6 +71,16 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     )?;
 
     match cli.command {
+        Command::Info => {
+            let client = IndexerClient::new(&operator, Duration::from_secs(cli.timeout))?;
+            let info = client.get_info().await?;
+            if cli.json {
+                println!("{}", render::render_json(&info)?);
+            } else {
+                println!("{}", render::render_info_human(&info));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Vtxo { outpoint } => {
             let outpoint = Outpoint::parse(&outpoint)?;
             let client = IndexerClient::new(&operator, Duration::from_secs(cli.timeout))?;
@@ -119,5 +131,29 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn info_accepts_global_flags_before_and_after_command() {
+        for args in [
+            vec!["akcli", "--operator", "http://localhost:7071", "--json", "--timeout", "5",
+                "--color", "never", "info"],
+            vec!["akcli", "info", "--operator", "http://localhost:7071", "--json",
+                "--timeout", "5", "--color", "never"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Command::Info));
+            assert_eq!(cli.operator.as_deref(), Some("http://localhost:7071"));
+            assert!(cli.json);
+            assert_eq!(cli.timeout, 5);
+            assert_eq!(cli.color, "never");
+        }
+        assert!(Cli::try_parse_from(["akcli", "info"]).is_ok());
+        assert!(Cli::try_parse_from(["akcli", "info", "unexpected"]).is_err());
     }
 }
