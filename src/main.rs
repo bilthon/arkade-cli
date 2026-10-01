@@ -1,5 +1,6 @@
 use std::io::IsTerminal;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
@@ -23,6 +24,10 @@ struct Cli {
     /// Colorize output: always, never, or auto (default; TTY-only, honors NO_COLOR).
     #[arg(long, global = true, default_value = "auto", value_parser = ["always", "never", "auto"])]
     color: String,
+
+    /// Request timeout in seconds.
+    #[arg(long, global = true, default_value_t = 10)]
+    timeout: u64,
 
     #[command(subcommand)]
     command: Command,
@@ -61,7 +66,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
         Command::Vtxo { outpoint } => {
             let outpoint = Outpoint::parse(&outpoint)?;
-            let client = IndexerClient::new(&operator);
+            let client = IndexerClient::new(&operator, Duration::from_secs(cli.timeout))?;
             match client.get_vtxo(&outpoint).await? {
                 Some(vtxo) => {
                     if cli.json {
