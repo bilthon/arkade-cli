@@ -37,7 +37,15 @@ Inspect a single VTXO by outpoint:
 akcli vtxo <txid>:<vout>
 akcli vtxo <txid>:<vout> --operator http://localhost:7071
 akcli --json vtxo <txid>:<vout>
+akcli --color never vtxo <txid>:<vout>
+akcli --timeout 5 vtxo <txid>:<vout>
 ```
+
+Global flags: `--operator <url>`, `--json`, `--color always|never|auto`
+(default `auto`: colors only on a TTY and honors `NO_COLOR`), and
+`--timeout <seconds>` (default 10). Amounts are shown with thousands separators
+and a BTC equivalent, and timestamps as UTC with the raw unix value in
+parentheses.
 
 Human-readable output keeps distinct Arkade identifiers clearly labeled:
 `spent by` (the spending/checkpoint transaction reported by the operator) is
