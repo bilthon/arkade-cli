@@ -1,0 +1,29 @@
+[package]
+name = "arkade-cli"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A read-only explorer and CLI for Arkade virtual transactions and outputs"
+repository = "https://github.com/bilthon/arkade-cli"
+keywords = ["ark", "arkade", "bitcoin", "cli"]
+categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
+
+[[bin]]
+name = "akcli"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+directories = "5"
+anyhow = "1"
+thiserror = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ark-rest = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567" }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
