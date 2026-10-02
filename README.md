@@ -99,7 +99,16 @@ Global flags: `--operator <url>`, `--json`, `--color always|never|auto`
 (default `auto`: colors only on a TTY and honors `NO_COLOR`), and
 `--timeout <seconds>` (default 10). Amounts are shown with thousands separators
 and a BTC equivalent (except the address table, which uses sats only), and timestamps as UTC with the raw unix value in
-parentheses.
+parentheses. `--color always` overrides `NO_COLOR`; `--color never` disables color.
+JSON output is never colored.
+
+In `address` and `vtxo` human views, explicit `spent` makes the entire status
+text red, including all flags and separators, but never padding, labels, or
+other columns. Otherwise, `unspent` is green; when also `preconfirmed`, both
+words are blue, and `swept` is independently red. Missing spent state is
+`unknown`; without the spent override, `unknown`, `unrolled`, and `preconfirmed`
+without explicit unspent stay neutral, as do separators. All true flags remain
+visible, including contradictory combinations.
 
 Human-readable output keeps distinct Arkade identifiers clearly labeled. Per the
 official SDK semantics, a spent VTXO is described at two layers: `spent by` is

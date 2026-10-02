@@ -9,6 +9,7 @@ const INDEXER_NOTE: &str =
     "Note: values reported by the operator indexer; not independent cryptographic proof.";
 
 const GREEN: &str = "\x1b[32m";
+const BLUE: &str = "\x1b[34m";
 const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
@@ -86,32 +87,41 @@ fn format_time(raw: Option<&str>) -> String {
     }
 }
 
-/// Compose the status line from the VTXO's boolean flags.
-fn status(vtxo: &IndexerVtxo) -> String {
-    let mut flags = Vec::new();
-    if vtxo.is_spent.unwrap_or(false) {
-        flags.push("spent");
-    } else {
-        flags.push("unspent");
+/// Color the entire spent status red; otherwise color words independently.
+/// Retain the plain width for table padding.
+fn status(vtxo: &IndexerVtxo, color: bool) -> (String, usize) {
+    let unspent_code = if vtxo.is_preconfirmed == Some(true) { BLUE } else { GREEN };
+    let mut flags = vec![match vtxo.is_spent {
+        Some(true) => ("spent", RED),
+        Some(false) => ("unspent", unspent_code),
+        None => ("unknown", ""),
+    }];
+    if vtxo.is_preconfirmed == Some(true) {
+        let code = if vtxo.is_spent == Some(false) { BLUE } else { "" };
+        flags.push(("preconfirmed", code));
     }
-    if vtxo.is_preconfirmed.unwrap_or(false) {
-        flags.push("preconfirmed");
+    if vtxo.is_swept == Some(true) {
+        flags.push(("swept", RED));
     }
-    if vtxo.is_swept.unwrap_or(false) {
-        flags.push("swept");
+    if vtxo.is_unrolled == Some(true) {
+        flags.push(("unrolled", ""));
     }
-    if vtxo.is_unrolled.unwrap_or(false) {
-        flags.push("unrolled");
+    let width = flags.iter().map(|(word, _)| word.len()).sum::<usize>()
+        + (flags.len() - 1) * 2;
+    if vtxo.is_spent == Some(true) {
+        let plain = flags.iter().map(|(word, _)| *word).collect::<Vec<_>>().join(", ");
+        return (paint(color, RED, &plain), width);
     }
-    flags.join(", ")
+    let display = flags.iter().map(|(word, code)| {
+        paint(color && !code.is_empty(), code, word)
+    }).collect::<Vec<_>>().join(", ");
+    (display, width)
 }
 
 /// Human-readable, labeled rendering of a VTXO. `color` enables ANSI coloring
-/// of the status value.
+/// of status text, with red spent status taking precedence over individual words.
 pub fn render_human(vtxo: &IndexerVtxo, outpoint: &Outpoint, color: bool) -> String {
-    let spent = vtxo.is_spent.unwrap_or(false);
-    let status_code = if spent { RED } else { GREEN };
-    let status_display = paint(color, status_code, &status(vtxo));
+    let (status_display, _) = status(vtxo, color);
     let commitment = vtxo
         .commitment_txids
         .as_ref()
@@ -202,7 +212,7 @@ pub fn render_info_human(info: &GetInfoResponse) -> String {
 }
 
 /// Compact address listing; the JSON record retains full identifiers.
-pub fn render_address_human(result: &crate::address::AddressResult) -> String {
+pub fn render_address_human(result: &crate::address::AddressResult, color: bool) -> String {
     let mut out = format!("Address {}\n", result.address);
     if result.vtxos.is_empty() {
         out.push_str("No VTXOs found for this address at the selected operator.\n");
@@ -218,15 +228,10 @@ pub fn render_address_human(result: &crate::address::AddressResult) -> String {
             }).unwrap_or_else(|| "-".into());
             let amount = vtxo.amount.as_deref().and_then(|s| s.parse::<u64>().ok())
                 .map(|n| format!("{} sat", with_thousands(n))).unwrap_or_else(|| "-".into());
-            let mut flags = vec![match vtxo.is_spent {
-                Some(true) => "spent", Some(false) => "unspent", None => "unknown",
-            }];
-            for (flag, label) in [(vtxo.is_preconfirmed, "preconfirmed"),
-                (vtxo.is_swept, "swept"), (vtxo.is_unrolled, "unrolled")] {
-                if flag == Some(true) { flags.push(label); }
-            }
-            out.push_str(&format!("{outpoint:<26} {amount:>22}  {:<36}  {}\n",
-                flags.join(", "), format_time(vtxo.expires_at.as_deref())));
+            let (status_display, status_width) = status(vtxo, color);
+            let padding = " ".repeat(36usize.saturating_sub(status_width));
+            out.push_str(&format!("{outpoint:<26} {amount:>22}  {status_display}{padding}  {}\n",
+                format_time(vtxo.expires_at.as_deref())));
         }
         out.push_str("Outpoint hashes abbreviated; use --json for full identifiers and records.\n");
     }
@@ -297,11 +302,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn human_preconfirmed_colors_each_status_token_blue() {
+        let vtxo = IndexerVtxo {
+            is_spent: Some(false), is_preconfirmed: Some(true), ..Default::default()
+        };
+        let out = render_human(&vtxo, &outpoint(), true);
+        assert!(out.contains("status:      \x1b[34munspent\x1b[0m, \x1b[34mpreconfirmed\x1b[0m\n"));
+    }
+
+    #[test]
+    fn address_preconfirmed_colors_each_status_token_blue() {
+        let result = crate::address::AddressResult {
+            address: "example".into(), scripts: vec![],
+            vtxos: vec![IndexerVtxo {
+                is_spent: Some(false), is_preconfirmed: Some(true), ..Default::default()
+            }],
+        };
+        let out = render_address_human(&result, true);
+        assert!(out.contains("\x1b[34munspent\x1b[0m, \x1b[34mpreconfirmed\x1b[0m"));
+    }
+
+    #[test]
+    fn status_palette_preserves_flags_alignment_and_json_in_both_views() {
+        let cases = [
+            (Some(false), None, None, None, "unspent", "\x1b[32munspent\x1b[0m"),
+            (Some(false), Some(false), Some(false), Some(false), "unspent", "\x1b[32munspent\x1b[0m"),
+            (Some(true), None, None, None, "spent", "\x1b[31mspent\x1b[0m"),
+            (None, None, None, None, "unknown", "unknown"),
+            (None, Some(true), None, Some(true),
+                "unknown, preconfirmed, unrolled", "unknown, preconfirmed, unrolled"),
+            (Some(false), Some(true), Some(true), Some(true),
+                "unspent, preconfirmed, swept, unrolled",
+                "\x1b[34munspent\x1b[0m, \x1b[34mpreconfirmed\x1b[0m, \x1b[31mswept\x1b[0m, unrolled"),
+            (Some(true), Some(true), None, None,
+                "spent, preconfirmed", "\x1b[31mspent, preconfirmed\x1b[0m"),
+            (Some(true), Some(true), Some(true), Some(true),
+                "spent, preconfirmed, swept, unrolled",
+                "\x1b[31mspent, preconfirmed, swept, unrolled\x1b[0m"),
+            (None, Some(true), Some(true), Some(true),
+                "unknown, preconfirmed, swept, unrolled",
+                "unknown, preconfirmed, \x1b[31mswept\x1b[0m, unrolled"),
+            (Some(false), None, Some(true), Some(true),
+                "unspent, swept, unrolled",
+                "\x1b[32munspent\x1b[0m, \x1b[31mswept\x1b[0m, unrolled"),
+        ];
+        for (spent, preconfirmed, swept, unrolled, plain_status, colored_status) in cases {
+            let vtxo = IndexerVtxo {
+                is_spent: spent, is_preconfirmed: preconfirmed,
+                is_swept: swept, is_unrolled: unrolled,
+                expires_at: Some("0".into()), ..spent_vtxo()
+            };
+            let result = crate::address::AddressResult {
+                address: "example".into(), scripts: vec![], vtxos: vec![vtxo.clone()],
+            };
+            let json_before = (render_json(&vtxo).unwrap(), render_json(&result).unwrap());
+            let human_plain = render_human(&vtxo, &outpoint(), false);
+            let human_color = render_human(&vtxo, &outpoint(), true);
+            assert!(human_plain.contains(&format!("status:      {plain_status}\n")));
+            assert_eq!(human_color, human_plain.replace(
+                &format!("status:      {plain_status}\n"),
+                &format!("status:      {colored_status}\n"),
+            ));
+
+            let table_plain = render_address_human(&result, false);
+            let table_color = render_address_human(&result, true);
+            assert!(table_plain.contains(plain_status));
+            assert_eq!(table_color, table_plain.replace(plain_status, colored_status));
+            for (plain, colored) in [(&human_plain, &human_color), (&table_plain, &table_color)] {
+                assert!(!plain.contains('\x1b'));
+                let stripped = colored.replace("\x1b[31m", "").replace("\x1b[32m", "")
+                    .replace("\x1b[34m", "").replace("\x1b[0m", "");
+                assert_eq!(&stripped, plain);
+            }
+            let row = table_plain.lines().nth(2).unwrap();
+            let expiry_column = row[..row.find("1970-").unwrap()].chars().count();
+            assert_eq!(expiry_column, 53 + plain_status.len().max(36));
+            assert!(row.ends_with("1970-01-01 00:00:00 UTC (0)"));
+
+            for (before, after, value) in [
+                (&json_before.0, render_json(&vtxo).unwrap(), serde_json::to_value(&vtxo).unwrap()),
+                (&json_before.1, render_json(&result).unwrap(), serde_json::to_value(&result).unwrap()),
+            ] {
+                assert_eq!(before, &after);
+                assert!(!after.contains('\x1b'));
+                assert!(!after.contains("\\u001b"));
+                assert_eq!(serde_json::from_str::<serde_json::Value>(&after).unwrap(), value);
+            }
+        }
+    }
+
+    #[test]
     fn address_table_preserves_unknowns_and_formats_sats_and_utc() {
         let mut result = crate::address::AddressResult {
             address: "example".into(), scripts: vec![], vtxos: vec![],
         };
-        assert!(render_address_human(&result).contains("No VTXOs found"));
+        assert!(render_address_human(&result, false).contains("No VTXOs found"));
         for spent in [None, Some(false), Some(true)] {
             result.vtxos.push(IndexerVtxo {
                 is_spent: spent, amount: Some("123456789".into()),
@@ -314,7 +409,7 @@ mod tests {
             "outpoint": {"txid": "aa11bb22cc33dd44ee55ff66778899001122334455667788990011223344abcd", "vout": 5},
             "isUnrolled": true
         })).unwrap());
-        let table = render_address_human(&result);
+        let table = render_address_human(&result, false);
         for expected in ["OUTPOINT", "AMOUNT", "STATUS", "EXPIRES"] {
             assert!(table.contains(expected));
         }
@@ -465,7 +560,7 @@ mod tests {
         .unwrap();
         let out = render_human(&bare, &outpoint(), false);
         assert!(out.contains("spent by:    -"));
-        assert!(out.contains("status:      unspent"));
+        assert!(out.contains("status:      unknown"));
     }
 
     #[test]
@@ -501,6 +596,15 @@ mod tests {
 
     #[test]
     fn should_color_modes() {
+        for no_color in [false, true] {
+            for tty in [false, true] {
+                assert!(should_color(Some("always"), no_color, tty));
+                assert!(!should_color(Some("never"), no_color, tty));
+                for mode in [None, Some("auto")] {
+                    assert_eq!(should_color(mode, no_color, tty), tty && !no_color);
+                }
+            }
+        }
         assert!(should_color(Some("always"), true, false));
         assert!(!should_color(Some("never"), false, true));
         assert!(should_color(Some("auto"), false, true));

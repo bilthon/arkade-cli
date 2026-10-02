@@ -75,6 +75,11 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         &config_path.display().to_string(),
     )?;
 
+    let color = render::should_color(
+        Some(cli.color.as_str()),
+        std::env::var_os("NO_COLOR").is_some(),
+        std::io::stdout().is_terminal(),
+    );
     match cli.command {
         Command::Info => {
             let client = IndexerClient::new(&operator, Duration::from_secs(cli.timeout))?;
@@ -92,7 +97,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if cli.json {
                 println!("{}", render::render_json(&result)?);
             } else {
-                println!("{}", render::render_address_human(&result));
+                println!("{}", render::render_address_human(&result, color));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -104,11 +109,6 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     if cli.json {
                         println!("{}", render::render_json(&vtxo)?);
                     } else {
-                        let color = render::should_color(
-                            Some(cli.color.as_str()),
-                            std::env::var_os("NO_COLOR").is_some(),
-                            std::io::stdout().is_terminal(),
-                        );
                         println!("{}", render::render_human(&vtxo, &outpoint, color));
                     }
                     Ok(ExitCode::SUCCESS)
@@ -156,13 +156,14 @@ mod tests {
     #[test]
     fn address_accepts_one_argument_and_global_flags() {
         for args in [
-            vec!["akcli", "--json", "--operator", "http://localhost:7071", "--timeout", "5", "address", "tark1example"],
-            vec!["akcli", "address", "tark1example", "--json", "--operator", "http://localhost:7071", "--timeout", "5"],
+            vec!["akcli", "--color", "always", "--json", "--operator", "http://localhost:7071", "--timeout", "5", "address", "tark1example"],
+            vec!["akcli", "address", "tark1example", "--color", "always", "--json", "--operator", "http://localhost:7071", "--timeout", "5"],
         ] {
             let cli = Cli::try_parse_from(args).unwrap();
             assert!(matches!(cli.command, Command::Address { address } if address == "tark1example"));
             assert!(cli.json);
             assert_eq!(cli.timeout, 5);
+            assert_eq!(cli.color, "always");
             assert_eq!(cli.operator.as_deref(), Some("http://localhost:7071"));
         }
         assert!(Cli::try_parse_from(["akcli", "address"]).is_err());
