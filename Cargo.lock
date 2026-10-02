@@ -115,7 +115,10 @@ name = "arkade-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ark-core",
  "ark-rest",
+ "bech32",
+ "bitcoin",
  "chrono",
  "clap",
  "directories",

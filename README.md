@@ -47,6 +47,31 @@ These are operator-reported values, not independently verified. JSON serializes
 SDK-known fields (including nested fees), not raw response bytes or unknown fields.
 HTTP 404 is an error (exit 1), not a missing indexer record.
 
+List indexer VTXOs for an Arkade address:
+
+```sh
+akcli address <ark1...|tark1...>
+akcli --json address <address>
+akcli address <address> --operator http://localhost:7071 --timeout 5
+```
+
+`address` validates a v0 Bech32m address locally, checks the operator's signer
+and network family, then queries its P2TR lookup script without status filters.
+The indexer accepts P2TR scripts as lookup keys; the address's OP_RETURN subdust
+script is not an accepted query script. `tark` covers supported test networks,
+not one specific network.
+All pages are buffered before output; incomplete/invalid pagination, duplicate
+outpoints, unusable outpoint identities, and HTTP errors fail with exit 1 and
+no partial result. An empty list succeeds (exit 0).
+
+The plain table shows abbreviated outpoints, integer satoshi amounts, status,
+and expiry in UTC (with the unix value). Missing values are `-`; missing spent
+state is `unknown`, and additional flags appear only when explicitly true.
+Use `--json` for an object containing `address`, `scripts` (the single queried
+P2TR script), and `vtxos`,
+including full identifiers and all SDK-known fields. These are indexer records,
+not a spendable balance or an atomic snapshot across pages.
+
 Inspect a single VTXO by outpoint:
 
 ```sh
@@ -73,7 +98,7 @@ decoding, and is not implemented yet.
 Global flags: `--operator <url>`, `--json`, `--color always|never|auto`
 (default `auto`: colors only on a TTY and honors `NO_COLOR`), and
 `--timeout <seconds>` (default 10). Amounts are shown with thousands separators
-and a BTC equivalent, and timestamps as UTC with the raw unix value in
+and a BTC equivalent (except the address table, which uses sats only), and timestamps as UTC with the raw unix value in
 parentheses.
 
 Human-readable output keeps distinct Arkade identifiers clearly labeled. Per the
@@ -89,19 +114,19 @@ output says so.
 
 | Code | Meaning |
 | ---- | ------- |
-| 0 | Requested information or record printed |
+| 0 | Requested information, record, or address list printed (including an empty list) |
 | 1 | Error (bad input, missing operator, transport/HTTP failure) |
 | 2 | No VTXO or commitment transaction found at the selected operator |
 
 ## Status
 
-Implemented: operator information (`info`), one VTXO (`vtxo`), and one commitment
-transaction (`tx`).
-Virtual/ark transaction decoding, address-to-script conversion, and ancestry
-tracing are follow-on ideas, not implemented yet.
+Implemented: operator information (`info`), address VTXO listing (`address`),
+one VTXO (`vtxo`), and one commitment transaction (`tx`).
+Virtual/ark transaction decoding and ancestry tracing are follow-on ideas,
+not implemented yet.
 
 Built on the official [Arkade Rust SDK](https://github.com/arkade-os/rust-sdk)
-(`ark-rest`).
+(`ark-rest` and `ark-core`, pinned to the same revision).
 
 ## License
 

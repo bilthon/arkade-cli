@@ -57,6 +57,45 @@ impl IndexerClient {
             .map_err(map_err)
     }
 
+    /// Validate locally, verify the operator identity, then buffer every page.
+    pub async fn get_address(&self, raw: &str) -> anyhow::Result<crate::address::AddressResult> {
+        use anyhow::Context;
+        use crate::address::{Address, AddressResult};
+
+        let address = Address::decode(raw)?;
+        address.check_operator(&self.get_info().await?)?;
+        let scripts = address.scripts();
+        let mut vtxos = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = 0;
+        loop {
+            let response = indexer_service_api::indexer_service_get_vtxos(
+                &self.config, Some(scripts.clone()), None,
+                None, None, None, None, None, None, None, Some(100), Some(cursor),
+            ).await.map_err(map_err)?;
+            let page = response.page.context("address response missing page metadata")?;
+            let next = page.next.context("address response missing page.next")?;
+            let total = page.total.context("address response missing page.total")?;
+            anyhow::ensure!(next >= 0 && total >= 0 && next <= total && next >= cursor
+                && (next == total || next > cursor), "invalid or nonadvancing address pagination");
+            for vtxo in response.vtxos.unwrap_or_default() {
+                let outpoint = vtxo.outpoint.as_ref().context("address VTXO missing outpoint")?;
+                let txid = outpoint.txid.as_deref().context("address VTXO missing txid")?;
+                let vout = outpoint.vout.context("address VTXO missing vout")?;
+                crate::outpoint::validate_txid(txid)?;
+                anyhow::ensure!(vout >= 0, "invalid address VTXO vout");
+                anyhow::ensure!(seen.insert((txid.to_ascii_lowercase(), vout)),
+                    "duplicate VTXO in address pagination");
+                vtxos.push(vtxo);
+            }
+            if next == total {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(AddressResult { address: raw.to_string(), scripts, vtxos })
+    }
+
     /// Fetch the VTXO at `outpoint`, or `Ok(None)` if the indexer has no record.
     pub async fn get_vtxo(&self, outpoint: &Outpoint) -> Result<Option<IndexerVtxo>, IndexerError> {
         let response = indexer_service_api::indexer_service_get_vtxos(
@@ -196,6 +235,169 @@ mod tests {
             .await;
         let client = IndexerClient::new(&server.uri(), Duration::from_millis(50)).unwrap();
         assert!(matches!(client.get_info().await.unwrap_err(), IndexerError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn address_uses_one_p2tr_lookup_script_accepted_by_operator() {
+        const SCRIPT: &str = "512025a43cecfa0e1b1a4f72d64ad15f4cfa7a84d0723e8511c969aa543638ea9967";
+        let server = MockServer::start().await;
+        Mock::given(path("/v1/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "network": "signet",
+                "signerPubkey": "0233ffb3dee353b1a9ebe4ced64b946238d0a4ac364f275d771da6ad2445d07ae0"
+            }))).mount(&server).await;
+        let record = serde_json::json!({
+            "outpoint": {"txid": TXID, "vout": 0}, "amount": "1000",
+            "script": SCRIPT, "isSpent": false
+        });
+        let response_record = record.clone();
+        Mock::given(method("GET")).and(path("/v1/indexer/vtxos"))
+            .respond_with(move |request: &wiremock::Request| {
+                let scripts: Vec<_> = request.url.query_pairs()
+                    .filter(|(key, _)| key == "scripts").map(|(_, value)| value).collect();
+                // Model arkd's hex/P2TR boundary, not the SDK's CSV encoding.
+                for script in &scripts {
+                    let message = if script.len() % 2 != 0
+                        || !script.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        Some("invalid script format, must be hex")
+                    } else if script.len() != 68 || !script.starts_with("5120") {
+                        Some("invalid script, must be P2TR")
+                    } else {
+                        None
+                    };
+                    if let Some(message) = message {
+                        return ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                            "code": 3, "message": message, "details": []
+                        }));
+                    }
+                }
+                assert_eq!(scripts, [SCRIPT], "exactly one P2TR lookup script");
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "vtxos": [response_record], "page": {"current": 1, "next": 1, "total": 1}
+                }))
+            }).expect(1).mount(&server).await;
+        let result = client(&server.uri()).get_address(crate::address::tests::ADDRESS)
+            .await.expect("operator must accept the address lookup");
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["address"], crate::address::tests::ADDRESS);
+        assert_eq!(json["scripts"], serde_json::json!([SCRIPT]));
+        assert_eq!(json["vtxos"], serde_json::json!([record]));
+    }
+
+    #[tokio::test]
+    async fn address_fetches_every_cursor_and_preserves_full_records() {
+        use wiremock::matchers::query_param;
+        let server = MockServer::start().await;
+        Mock::given(path("/v1/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "network": "signet",
+                "signerPubkey": "0233ffb3dee353b1a9ebe4ced64b946238d0a4ac364f275d771da6ad2445d07ae0"
+            })))
+            .mount(&server).await;
+        let record = serde_json::json!({
+            "outpoint": {"txid": TXID, "vout": 0}, "amount": "123456789",
+            "spentBy": TXID, "arkTxid": TXID, "settledBy": TXID,
+            "commitmentTxids": [TXID], "isSpent": true
+        });
+        // A short nonterminal page must not stop traversal; next is a cursor,
+        // not the number of records returned. The terminal page can be empty.
+        for (cursor, body) in [
+            (0, serde_json::json!({"vtxos": [record.clone()], "page": {"next": 7, "total": 9}})),
+            (7, serde_json::json!({"vtxos": [], "page": {"next": 9, "total": 9}})),
+        ] {
+            Mock::given(method("GET")).and(path("/v1/indexer/vtxos"))
+                .and(query_param("page.index", cursor.to_string()))
+                .and(query_param("page.size", "100"))
+                .and(query_param("scripts", "512025a43cecfa0e1b1a4f72d64ad15f4cfa7a84d0723e8511c969aa543638ea9967"))
+                .and(header_regex("user-agent", "^akcli/"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1).mount(&server).await;
+        }
+        let result = client(&server.uri()).get_address(crate::address::tests::ADDRESS).await.unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["address"], crate::address::tests::ADDRESS);
+        assert_eq!(json["scripts"].as_array().unwrap().len(), 1);
+        assert_eq!(json["vtxos"], serde_json::json!([record]));
+        for request in server.received_requests().await.unwrap() {
+            if request.url.path() == "/v1/indexer/vtxos" {
+                assert_eq!(request.url.query_pairs().count(), 3, "no status filters");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn address_fails_closed_on_incomplete_or_inconsistent_pages() {
+        use wiremock::matchers::query_param;
+        let record = serde_json::json!({"outpoint": {"txid": TXID, "vout": 0}});
+        for (body, status, message) in [
+            (serde_json::json!({"page": {"next": -1, "total": -1}}), 200, "pagination"),
+            (serde_json::json!({"page": {"next": 10, "total": 9}}), 200, "pagination"),
+            (serde_json::json!({"page": {"next": 7, "total": 9}}), 200, "pagination"),
+            (serde_json::json!({"page": {"next": 0, "total": 9}}), 200, "pagination"),
+            (serde_json::json!({}), 200, "missing page"),
+            (serde_json::json!({"page": {"total": 9}}), 200, "missing page.next"),
+            (serde_json::json!({"page": {"next": 9}}), 200, "missing page.total"),
+            (serde_json::json!({"vtxos": [record.clone()], "page": {"next": 9, "total": 9}}), 200, "duplicate"),
+            (serde_json::json!({"error": "later failure"}), 500, "HTTP 500"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(path("/v1/info"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "network": "signet",
+                    "signerPubkey": "0233ffb3dee353b1a9ebe4ced64b946238d0a4ac364f275d771da6ad2445d07ae0"
+                }))).mount(&server).await;
+            Mock::given(path("/v1/indexer/vtxos")).and(query_param("page.index", "0"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "vtxos": [record.clone()], "page": {"next": 7, "total": 9}
+                }))).up_to_n_times(1).mount(&server).await;
+            Mock::given(path("/v1/indexer/vtxos")).and(query_param("page.index", "7"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .up_to_n_times(1).mount(&server).await;
+            let error = client(&server.uri()).get_address(crate::address::tests::ADDRESS)
+                .await.unwrap_err().to_string();
+            assert!(error.contains(message), "{error} should contain {message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn address_empty_result_succeeds_but_duplicate_or_unidentifiable_records_fail() {
+        let record = serde_json::json!({"outpoint": {"txid": TXID, "vout": 0}});
+        for (records, succeeds) in [
+            (serde_json::json!([]), true),
+            (serde_json::json!([record.clone(), record]), false),
+            (serde_json::json!([{}]), false),
+            (serde_json::json!([{"outpoint": {"txid": TXID}}]), false),
+            (serde_json::json!([{"outpoint": {"txid": TXID, "vout": -1}}]), false),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(path("/v1/info"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "network": "signet",
+                    "signerPubkey": "0233ffb3dee353b1a9ebe4ced64b946238d0a4ac364f275d771da6ad2445d07ae0"
+                }))).mount(&server).await;
+            Mock::given(path("/v1/indexer/vtxos"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "vtxos": records, "page": {"next": 0, "total": 0}
+                }))).expect(1).mount(&server).await;
+            let result = client(&server.uri()).get_address(crate::address::tests::ADDRESS).await;
+            assert_eq!(result.is_ok(), succeeds);
+            if let Ok(result) = result {
+                assert!(result.vtxos.is_empty());
+                assert_eq!(serde_json::to_value(result).unwrap()["vtxos"], serde_json::json!([]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn address_invalid_input_never_sends_http_and_missing_identity_never_queries_scripts() {
+        let server = MockServer::start().await;
+        assert!(client(&server.uri()).get_address("invalid").await.is_err());
+        assert!(server.received_requests().await.unwrap().is_empty());
+        Mock::given(path("/v1/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1).mount(&server).await;
+        assert!(client(&server.uri()).get_address(crate::address::tests::ADDRESS).await.is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     const TXID: &str = "aa11bb22cc33dd44ee55ff66778899001122334455667788990011223344abcd";

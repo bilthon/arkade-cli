@@ -23,6 +23,9 @@ anyhow = "1"
 thiserror = "1"
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ark-core = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567" }
+bitcoin = "0.32.7"
+bech32 = "0.11"
 ark-rest = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567" }
 
 [dev-dependencies]

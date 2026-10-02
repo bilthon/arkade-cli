@@ -201,6 +201,39 @@ pub fn render_info_human(info: &GetInfoResponse) -> String {
     out
 }
 
+/// Compact address listing; the JSON record retains full identifiers.
+pub fn render_address_human(result: &crate::address::AddressResult) -> String {
+    let mut out = format!("Address {}\n", result.address);
+    if result.vtxos.is_empty() {
+        out.push_str("No VTXOs found for this address at the selected operator.\n");
+    } else {
+        out.push_str(&format!("{:<26} {:>22}  {:<36}  EXPIRES\n", "OUTPOINT", "AMOUNT", "STATUS"));
+        for vtxo in &result.vtxos {
+            let outpoint = vtxo.outpoint.as_ref().map(|p| {
+                let txid = or_dash(p.txid.as_deref());
+                let hash = if txid.len() == 64 && txid.is_ascii() {
+                    format!("{}…{}", &txid[..12], &txid[58..])
+                } else { txid.to_string() };
+                format!("{hash}:{}", p.vout.map(|v| v.to_string()).unwrap_or_else(|| "-".into()))
+            }).unwrap_or_else(|| "-".into());
+            let amount = vtxo.amount.as_deref().and_then(|s| s.parse::<u64>().ok())
+                .map(|n| format!("{} sat", with_thousands(n))).unwrap_or_else(|| "-".into());
+            let mut flags = vec![match vtxo.is_spent {
+                Some(true) => "spent", Some(false) => "unspent", None => "unknown",
+            }];
+            for (flag, label) in [(vtxo.is_preconfirmed, "preconfirmed"),
+                (vtxo.is_swept, "swept"), (vtxo.is_unrolled, "unrolled")] {
+                if flag == Some(true) { flags.push(label); }
+            }
+            out.push_str(&format!("{outpoint:<26} {amount:>22}  {:<36}  {}\n",
+                flags.join(", "), format_time(vtxo.expires_at.as_deref())));
+        }
+        out.push_str("Outpoint hashes abbreviated; use --json for full identifiers and records.\n");
+    }
+    out.push_str(INDEXER_NOTE);
+    out
+}
+
 /// Machine-readable rendering: any SDK or local record as pretty JSON.
 pub fn render_json<T: serde::Serialize>(value: &T) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(value)
@@ -262,6 +295,43 @@ pub fn render_not_found(outpoint: &Outpoint) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_table_preserves_unknowns_and_formats_sats_and_utc() {
+        let mut result = crate::address::AddressResult {
+            address: "example".into(), scripts: vec![], vtxos: vec![],
+        };
+        assert!(render_address_human(&result).contains("No VTXOs found"));
+        for spent in [None, Some(false), Some(true)] {
+            result.vtxos.push(IndexerVtxo {
+                is_spent: spent, amount: Some("123456789".into()),
+                expires_at: Some("0".into()), is_swept: Some(true),
+                is_preconfirmed: Some(false), ..Default::default()
+            });
+        }
+        result.vtxos.push(IndexerVtxo::default());
+        result.vtxos.push(serde_json::from_value(serde_json::json!({
+            "outpoint": {"txid": "aa11bb22cc33dd44ee55ff66778899001122334455667788990011223344abcd", "vout": 5},
+            "isUnrolled": true
+        })).unwrap());
+        let table = render_address_human(&result);
+        for expected in ["OUTPOINT", "AMOUNT", "STATUS", "EXPIRES"] {
+            assert!(table.contains(expected));
+        }
+        assert!(table.contains("123,456,789 sat"));
+        assert!(table.contains("1970-01-01 00:00:00 UTC (0)"));
+        for state in ["unknown, swept", "unspent, swept", "spent, swept"] {
+            assert!(table.contains(state));
+        }
+        assert!(!table.contains("preconfirmed"));
+        assert!(!table.contains("BTC"));
+        assert!(table.contains("aa11bb22cc33…44abcd:5"));
+        assert!(table.contains("unknown, unrolled"));
+        assert!(table.contains("--json"));
+        let json = render_json(&result).unwrap();
+        assert!(json.contains("aa11bb22cc33dd44ee55ff66778899001122334455667788990011223344abcd"));
+        assert!(table.lines().any(|line| line.split_whitespace().collect::<Vec<_>>() == ["-", "-", "unknown", "-"]));
+    }
 
     #[test]
     fn info_human_labels_identity_limits_fees_and_raw_schedule() {

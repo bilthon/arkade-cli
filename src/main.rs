@@ -37,6 +37,11 @@ struct Cli {
 enum Command {
     /// Show operator information and policy.
     Info,
+    /// List all indexer VTXOs linked to an Arkade address.
+    Address {
+        /// Arkade address (ark1... or tark1...).
+        address: String,
+    },
     /// Inspect a single VTXO by outpoint (<txid>:<vout>).
     Vtxo {
         /// Outpoint in the form <txid>:<vout>.
@@ -78,6 +83,16 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 println!("{}", render::render_json(&info)?);
             } else {
                 println!("{}", render::render_info_human(&info));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Address { address } => {
+            let client = IndexerClient::new(&operator, Duration::from_secs(cli.timeout))?;
+            let result = client.get_address(&address).await?;
+            if cli.json {
+                println!("{}", render::render_json(&result)?);
+            } else {
+                println!("{}", render::render_address_human(&result));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -137,6 +152,22 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_accepts_one_argument_and_global_flags() {
+        for args in [
+            vec!["akcli", "--json", "--operator", "http://localhost:7071", "--timeout", "5", "address", "tark1example"],
+            vec!["akcli", "address", "tark1example", "--json", "--operator", "http://localhost:7071", "--timeout", "5"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Command::Address { address } if address == "tark1example"));
+            assert!(cli.json);
+            assert_eq!(cli.timeout, 5);
+            assert_eq!(cli.operator.as_deref(), Some("http://localhost:7071"));
+        }
+        assert!(Cli::try_parse_from(["akcli", "address"]).is_err());
+        assert!(Cli::try_parse_from(["akcli", "address", "a", "b"]).is_err());
+    }
 
     #[test]
     fn info_accepts_global_flags_before_and_after_command() {
