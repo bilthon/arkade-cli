@@ -91,14 +91,38 @@ akcli --json tx <commitment-txid>
 
 The `commitment:` field shown by `akcli vtxo` is a commitment txid you can feed
 straight into `akcli tx`. `tx` shows input/output amounts and VTXO counts, batch
-timing, and per-batch expiry/swept state. Resolving virtual/ark transactions
-(the `arkTxid`/`spentBy` identifiers) needs proof-of-ownership and transaction
-decoding, and is not implemented yet.
+timing, and per-batch expiry/swept state. `tx` remains commitment-only.
+
+Inspect a virtual transaction (for example an `arkTxid` or `spentBy` identifier):
+
+```sh
+akcli virtual-tx <txid>
+akcli --json virtual-tx <txid>
+akcli virtual-tx <txid> --operator http://localhost:7071 --timeout 5
+```
+
+`virtual-tx` validates a 64-character lowercase hex ID before HTTP and makes one
+anonymous request for the operator-provided PSBT. It checks the unsigned
+transaction's computed ID, then displays version, consensus locktime, counts,
+output total, and INPUTS/OUTPUTS tables with full outpoints and script hex.
+Output table amounts are integer sats. No fields are colored, even with
+`--color always`. JSON contains the same decoded fields with integer satoshi
+amounts and a `psbt` field retaining the exact original base64 PSBT.
+
+Access depends on operator policy: some operators allow anonymous lookup,
+others may omit signatures or restrict access. No authentication integration
+is implemented yet. Signatures and spendability are **not verified**; decoding
+is not proof of executability, and no input amounts or fees are inferred.
+An explicit HTTP 200 `txs: []` means no record (exit 2, human message or JSON
+`null`). HTTP 404, like 403 and other HTTP failures, is an error (exit 1), unlike
+`tx`'s commitment-404 handling. Missing/null `txs`, multiple records (including
+duplicates), malformed PSBTs, mismatched IDs, and output-total overflow are
+errors with no partial result.
 
 Global flags: `--operator <url>`, `--json`, `--color always|never|auto`
 (default `auto`: colors only on a TTY and honors `NO_COLOR`), and
 `--timeout <seconds>` (default 10). Amounts are shown with thousands separators
-and a BTC equivalent (except the address table, which uses sats only), and timestamps as UTC with the raw unix value in
+and a BTC equivalent (except address and virtual transaction output tables, which use sats only), and timestamps as UTC with the raw unix value in
 parentheses. `--color always` overrides `NO_COLOR`; `--color never` disables color.
 JSON output is never colored.
 
@@ -125,14 +149,13 @@ output says so.
 | ---- | ------- |
 | 0 | Requested information, record, or address list printed (including an empty list) |
 | 1 | Error (bad input, missing operator, transport/HTTP failure) |
-| 2 | No VTXO or commitment transaction found at the selected operator |
+| 2 | No VTXO, commitment transaction, or virtual transaction found at the selected operator |
 
 ## Status
 
 Implemented: operator information (`info`), address VTXO listing (`address`),
-one VTXO (`vtxo`), and one commitment transaction (`tx`).
-Virtual/ark transaction decoding and ancestry tracing are follow-on ideas,
-not implemented yet.
+one VTXO (`vtxo`), one commitment transaction (`tx`), and virtual transaction
+PSBT inspection (`virtual-tx`). Ancestry tracing is not implemented yet.
 
 Built on the official [Arkade Rust SDK](https://github.com/arkade-os/rust-sdk)
 (`ark-rest` and `ark-core`, pinned to the same revision).

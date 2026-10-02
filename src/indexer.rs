@@ -50,6 +50,18 @@ impl IndexerClient {
         Ok(Self { config })
     }
 
+    /// Fetch one virtual transaction PSBT; only an explicit empty list means not found.
+    pub async fn get_virtual_tx(&self, txid: &str) -> anyhow::Result<Option<crate::virtual_tx::VirtualTx>> {
+        use anyhow::{ensure, Context};
+        crate::outpoint::validate_txid(txid)?;
+        let response = indexer_service_api::indexer_service_get_virtual_txs(
+            &self.config, vec![txid.to_owned()], None, None, None, None, None,
+        ).await.map_err(map_err)?;
+        let txs = response.txs.context("virtual transaction response missing txs")?;
+        ensure!(txs.len() <= 1, "multiple virtual transaction records returned");
+        txs.first().map(|psbt| crate::virtual_tx::VirtualTx::decode(txid, psbt)).transpose()
+    }
+
     /// Fetch operator information. All HTTP failures, including 404, are errors.
     pub async fn get_info(&self) -> Result<GetInfoResponse, IndexerError> {
         ark_service_api::ark_service_get_info(&self.config)
@@ -163,6 +175,83 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header_regex, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn virtual_tx_single_unpaginated_anonymous_request() {
+        let server = MockServer::start().await;
+        let (txid, psbt) = crate::virtual_tx::tests::fixture([5_000_000_000, 330]);
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/indexer/virtualTx/{txid}")))
+            .and(header_regex("user-agent", "^akcli/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"txs": [psbt]})))
+            .expect(1).mount(&server).await;
+        let tx = client(&server.uri()).get_virtual_tx(&txid).await.unwrap().unwrap();
+        assert_eq!(tx.psbt, psbt);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.query().is_none());
+        assert!(!requests[0].headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn virtual_tx_empty_missing_null_multiple_and_corrupt_records() {
+        let (txid, psbt) = crate::virtual_tx::tests::fixture([1, 2]);
+        for (body, expected) in [
+            (serde_json::json!({"txs": []}), None),
+            (serde_json::json!({}), Some("missing txs")),
+            (serde_json::json!({"txs": null}), Some("missing txs")),
+            (serde_json::json!({"txs": [psbt, psbt]}), Some("multiple")),
+            (serde_json::json!({"txs": [psbt, "other"]}), Some("multiple")),
+            (serde_json::json!({"txs": ["!"]}), Some("base64")),
+            (serde_json::json!({"txs": ["bm90IHBzYnQ="]}), Some("PSBT")),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(path(format!("/v1/indexer/virtualTx/{txid}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1).mount(&server).await;
+            let result = client(&server.uri()).get_virtual_tx(&txid).await;
+            match expected {
+                None => assert!(result.unwrap().is_none()),
+                Some(message) => assert!(result.unwrap_err().to_string().contains(message)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn virtual_tx_errors_preserve_status_body_malformed_and_timeout() {
+        for status in [404, 403, 500, 200] {
+            let server = MockServer::start().await;
+            Mock::given(path(format!("/v1/indexer/virtualTx/{TXID}")))
+                .respond_with(ResponseTemplate::new(status).set_body_string("operator failure"))
+                .expect(1).mount(&server).await;
+            let error = client(&server.uri()).get_virtual_tx(TXID).await.unwrap_err();
+            match error.downcast_ref::<IndexerError>().unwrap() {
+                IndexerError::Response { status: actual, body } => {
+                    assert_eq!(actual.as_u16(), status);
+                    assert_eq!(body, "operator failure");
+                }
+                IndexerError::Malformed(_) => assert_eq!(status, 200),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(path(format!("/v1/indexer/virtualTx/{TXID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"txs": []}))
+                .set_delay(Duration::from_millis(400)))
+            .mount(&server).await;
+        let client = IndexerClient::new(&server.uri(), Duration::from_millis(50)).unwrap();
+        let error = client.get_virtual_tx(TXID).await.unwrap_err();
+        assert!(matches!(error.downcast_ref::<IndexerError>(), Some(IndexerError::Transport(_))));
+    }
+
+    #[tokio::test]
+    async fn virtual_tx_invalid_id_never_sends_http() {
+        let server = MockServer::start().await;
+        for invalid in ["bad".into(), TXID.to_uppercase(), "g".repeat(64)] {
+            assert!(client(&server.uri()).get_virtual_tx(&invalid).await.is_err());
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 
     fn client(uri: &str) -> IndexerClient {
         IndexerClient::new(uri, Duration::from_secs(5)).unwrap()

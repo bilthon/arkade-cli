@@ -239,6 +239,25 @@ pub fn render_address_human(result: &crate::address::AddressResult, color: bool)
     out
 }
 
+/// Full unsigned transaction fields; intentionally never colored.
+pub fn render_virtual_tx_human(tx: &crate::virtual_tx::VirtualTx) -> String {
+    let mut out = format!(
+        "Virtual tx {}\n  version: {}\n  locktime: {}\n  inputs: {}\n  outputs: {}\n  output total: {}\n\nINPUTS\n{:<75} SEQUENCE\n",
+        tx.txid, tx.version, tx.locktime, tx.input_count, tx.output_count,
+        format_amount(Some(&tx.output_total_sat.to_string())), "PREVIOUS OUTPOINT",
+    );
+    for input in &tx.inputs {
+        out.push_str(&format!("{:<75} {}\n", input.previous_outpoint, input.sequence));
+    }
+    out.push_str(&format!("\nOUTPUTS\n{:<10} {:>26}  SCRIPT HEX\n", "INDEX", "AMOUNT"));
+    for output in &tx.outputs {
+        let amount = format!("{} sat", with_thousands(output.amount_sat));
+        out.push_str(&format!("{:<10} {amount:>26}  {}\n", output.index, output.script_hex));
+    }
+    out.push_str("Note: operator-provided PSBT; signatures may be omitted; signatures and spendability are not verified.");
+    out
+}
+
 /// Machine-readable rendering: any SDK or local record as pretty JSON.
 pub fn render_json<T: serde::Serialize>(value: &T) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(value)
@@ -300,6 +319,25 @@ pub fn render_not_found(outpoint: &Outpoint) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_tx_full_identifiers_tables_amounts_and_disclaimer() {
+        let (txid, psbt) = crate::virtual_tx::tests::fixture([5_000_000_000, 330]);
+        let tx = crate::virtual_tx::VirtualTx::decode(&txid, &psbt).unwrap();
+        let out = render_virtual_tx_human(&tx);
+        for expected in [txid, format!("{}:7", "11".repeat(32)), "51".repeat(40),
+            "version: 2".into(), "locktime: 123".into(), "inputs: 1".into(), "outputs: 2".into(),
+            "5,000,000,330 sat (50.00000330 BTC)".into(), "5,000,000,000 sat".into(),
+            "INPUTS".into(), "OUTPUTS".into(), "SEQUENCE".into(), "42".into(),
+            "operator-provided PSBT".into(), "signatures may be omitted".into(),
+            "signatures and spendability are not verified".into()] {
+            assert!(out.contains(&expected), "missing {expected}");
+        }
+        for text in [out, render_json(&tx).unwrap()] {
+            assert!(!text.contains('\x1b'));
+            assert!(!text.contains("\\u001b"));
+        }
+    }
 
     #[test]
     fn human_preconfirmed_colors_each_status_token_blue() {

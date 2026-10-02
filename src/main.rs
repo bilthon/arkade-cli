@@ -47,6 +47,11 @@ enum Command {
         /// Outpoint in the form <txid>:<vout>.
         outpoint: String,
     },
+    /// Inspect an operator-provided virtual transaction PSBT by txid.
+    VirtualTx {
+        /// Virtual transaction id (64 lowercase hex chars).
+        txid: String,
+    },
     /// Inspect a commitment transaction by txid.
     Tx {
         /// Commitment transaction id (64 hex chars).
@@ -124,6 +129,10 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 }
             }
         }
+        Command::VirtualTx { txid } => {
+            let client = IndexerClient::new(&operator, Duration::from_secs(cli.timeout))?;
+            virtual_tx_command(&client, &txid, cli.json, &mut std::io::stdout()).await
+        }
         Command::Tx { txid } => {
             outpoint::validate_txid(&txid)?;
             let client = IndexerClient::new(&operator, Duration::from_secs(cli.timeout))?;
@@ -149,9 +158,95 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
 }
 
+// Buffer the complete result before writing; this seam avoids global config/env in tests.
+async fn virtual_tx_command(
+    client: &IndexerClient,
+    txid: &str,
+    json: bool,
+    stdout: &mut impl std::io::Write,
+) -> anyhow::Result<ExitCode> {
+    let result = client.get_virtual_tx(txid).await?;
+    let code = if result.is_some() { ExitCode::SUCCESS } else { ExitCode::from(2) };
+    let output = if json {
+        render::render_json(&result)?
+    } else {
+        match result {
+            Some(tx) => render::render_virtual_tx_human(&tx),
+            None => format!("No virtual transaction {txid} found at the selected operator."),
+        }
+    };
+    writeln!(stdout, "{output}")?;
+    Ok(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_tx_accepts_one_id_and_global_flags() {
+        for args in [
+            vec!["akcli", "--json", "--color", "always", "--operator", "http://localhost:7071", "--timeout", "5", "virtual-tx", "id"],
+            vec!["akcli", "virtual-tx", "id", "--json", "--color", "always", "--operator", "http://localhost:7071", "--timeout", "5"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Command::VirtualTx { txid } if txid == "id"));
+            assert!(cli.json);
+            assert_eq!(cli.color, "always");
+            assert_eq!(cli.timeout, 5);
+            assert_eq!(cli.operator.as_deref(), Some("http://localhost:7071"));
+        }
+        assert!(Cli::try_parse_from(["akcli", "virtual-tx"]).is_err());
+        assert!(Cli::try_parse_from(["akcli", "virtual-tx", "a", "b"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn virtual_tx_command_exit_codes_and_buffered_output() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::path;
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn::default()],
+            output: vec![],
+        };
+        let txid = tx.compute_txid().to_string();
+        let psbt = STANDARD.encode(bitcoin::psbt::Psbt::from_unsigned_tx(tx).unwrap().serialize());
+        for json in [false, true] {
+            for (status, body, code) in [
+                (200, serde_json::json!({"txs": [psbt]}), Some(ExitCode::SUCCESS)),
+                (200, serde_json::json!({"txs": []}), Some(ExitCode::from(2))),
+                (404, serde_json::json!({}), None),
+                (200, serde_json::json!({"txs": [psbt, psbt]}), None),
+                (200, serde_json::json!({"txs": ["!"]}), None),
+            ] {
+                let server = MockServer::start().await;
+                Mock::given(path(format!("/v1/indexer/virtualTx/{txid}")))
+                    .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                    .expect(1).mount(&server).await;
+                let client = IndexerClient::new(&server.uri(), Duration::from_secs(5)).unwrap();
+                let mut stdout = Vec::new();
+                let result = virtual_tx_command(&client, &txid, json, &mut stdout).await;
+                if let Some(code) = code {
+                    assert_eq!(result.unwrap(), code);
+                    let text = String::from_utf8(stdout).unwrap();
+                    assert!(!text.contains('\x1b'));
+                    if code == ExitCode::from(2) {
+                        if json { assert_eq!(text, "null\n"); }
+                        else { assert!(text.contains(&format!("No virtual transaction {txid}"))); }
+                    } else if json {
+                        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["psbt"], psbt);
+                    } else {
+                        assert!(text.contains("Virtual tx"));
+                    }
+                } else {
+                    assert!(result.is_err()); // main maps errors to exit 1.
+                    assert!(stdout.is_empty());
+                }
+            }
+        }
+    }
 
     #[test]
     fn address_accepts_one_argument_and_global_flags() {
