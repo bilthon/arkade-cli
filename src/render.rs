@@ -217,25 +217,56 @@ pub fn render_address_human(result: &crate::address::AddressResult, color: bool)
     if result.vtxos.is_empty() {
         out.push_str("No VTXOs found for this address at the selected operator.\n");
     } else {
-        out.push_str(&format!("{:<26} {:>22}  {:<36}  EXPIRES\n", "OUTPOINT", "AMOUNT", "STATUS"));
-        for vtxo in &result.vtxos {
-            let outpoint = vtxo.outpoint.as_ref().map(|p| {
-                let txid = or_dash(p.txid.as_deref());
-                let hash = if txid.len() == 64 && txid.is_ascii() {
-                    format!("{}…{}", &txid[..12], &txid[58..])
-                } else { txid.to_string() };
-                format!("{hash}:{}", p.vout.map(|v| v.to_string()).unwrap_or_else(|| "-".into()))
-            }).unwrap_or_else(|| "-".into());
-            let amount = vtxo.amount.as_deref().and_then(|s| s.parse::<u64>().ok())
-                .map(|n| format!("{} sat", with_thousands(n))).unwrap_or_else(|| "-".into());
-            let (status_display, status_width) = status(vtxo, color);
-            let padding = " ".repeat(36usize.saturating_sub(status_width));
-            out.push_str(&format!("{outpoint:<26} {amount:>22}  {status_display}{padding}  {}\n",
-                format_time(vtxo.expires_at.as_deref())));
-        }
-        out.push_str("Outpoint hashes abbreviated; use --json for full identifiers and records.\n");
+        append_vtxo_table(&mut out, &result.vtxos, color);
     }
     out.push_str(INDEXER_NOTE);
+    out
+}
+
+fn append_vtxo_table(out: &mut String, vtxos: &[IndexerVtxo], color: bool) {
+    out.push_str(&format!("{:<26} {:>22}  {:<36}  EXPIRES\n", "OUTPOINT", "AMOUNT", "STATUS"));
+    for vtxo in vtxos {
+        let outpoint = vtxo.outpoint.as_ref().map(|p| {
+            let txid = or_dash(p.txid.as_deref());
+            let hash = if txid.len() == 64 && txid.is_ascii() {
+                format!("{}…{}", &txid[..12], &txid[58..])
+            } else { txid.to_string() };
+            format!("{hash}:{}", p.vout.map(|v| v.to_string()).unwrap_or_else(|| "-".into()))
+        }).unwrap_or_else(|| "-".into());
+        let amount = vtxo.amount.as_deref().and_then(|s| s.parse::<u64>().ok())
+            .map(|n| format!("{} sat", with_thousands(n))).unwrap_or_else(|| "-".into());
+        let (status_display, status_width) = status(vtxo, color);
+        let padding = " ".repeat(36usize.saturating_sub(status_width));
+        out.push_str(&format!("{outpoint:<26} {amount:>22}  {status_display}{padding}  {}\n",
+            format_time(vtxo.expires_at.as_deref())));
+    }
+    out.push_str("Outpoint hashes abbreviated; use --json for full identifiers and records.\n");
+}
+
+/// Local bytecode summary plus an explicitly supported or unsupported lookup.
+pub fn render_script_human(result: &crate::script::ScriptResult, color: bool) -> String {
+    let script = &result.script;
+    let mut out = format!("Script {}\n  type: {}\n  ASM: {}\n", script.hex, script.script_type, script.asm);
+    if let Some(version) = script.witness_version {
+        out.push_str(&format!("  witness version: {version}\n"));
+    }
+    if let Some(key) = &script.p2tr_output_key {
+        out.push_str(&format!("  P2TR output key: {key}\n"));
+    }
+    match &result.vtxos {
+        None => out.push_str("Lookup unsupported: only P2TR scripts support indexer lookup; no request made.\n"),
+        Some(vtxos) => {
+            out.push_str("Lookup complete.\n");
+            if vtxos.is_empty() {
+                out.push_str("No VTXOs found for this script at the selected operator.\n");
+            } else {
+                append_vtxo_table(&mut out, vtxos, color);
+            }
+            out.push_str(INDEXER_NOTE);
+            out.push('\n');
+        }
+    }
+    out.push_str("Note: structural decoding only; script execution, signatures, key validity, ownership and spendability are not verified. No internal key or script tree is inferred.");
     out
 }
 
@@ -361,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn status_palette_preserves_flags_alignment_and_json_in_both_views() {
+    fn script_address_and_vtxo_status_palette_preserves_flags_alignment_and_json() {
         let cases = [
             (Some(false), None, None, None, "unspent", "\x1b[32munspent\x1b[0m"),
             (Some(false), Some(false), Some(false), Some(false), "unspent", "\x1b[32munspent\x1b[0m"),
@@ -404,6 +435,18 @@ mod tests {
 
             let table_plain = render_address_human(&result, false);
             let table_color = render_address_human(&result, true);
+            let script_result = crate::script::ScriptResult {
+                script: crate::script::ScriptSummary::decode(&format!("5120{}", "ff".repeat(32))).unwrap(),
+                lookup_status: crate::script::LookupStatus::Complete,
+                vtxos: Some(vec![vtxo.clone()]),
+            };
+            for (color, address_table) in [(false, &table_plain), (true, &table_color)] {
+                let script_table = render_script_human(&script_result, color);
+                assert!(script_table.contains(address_table.split_once('\n').unwrap().1));
+            }
+            let script_json = render_json(&script_result).unwrap();
+            assert!(!script_json.contains('\x1b'));
+            assert!(!script_json.contains("\\u001b"));
             assert!(table_plain.contains(plain_status));
             assert_eq!(table_color, table_plain.replace(plain_status, colored_status));
             for (plain, colored) in [(&human_plain, &human_color), (&table_plain, &table_color)] {

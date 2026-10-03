@@ -6,4 +6,5 @@ pub mod config;
 pub mod indexer;
 pub mod outpoint;
 pub mod render;
+pub mod script;
 pub mod virtual_tx;

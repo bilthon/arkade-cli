@@ -71,12 +71,28 @@ impl IndexerClient {
 
     /// Validate locally, verify the operator identity, then buffer every page.
     pub async fn get_address(&self, raw: &str) -> anyhow::Result<crate::address::AddressResult> {
-        use anyhow::Context;
         use crate::address::{Address, AddressResult};
 
         let address = Address::decode(raw)?;
         address.check_operator(&self.get_info().await?)?;
         let scripts = address.scripts();
+        let vtxos = self.get_script_vtxos(scripts.clone()).await?;
+        Ok(AddressResult { address: raw.to_string(), scripts, vtxos })
+    }
+
+    /// Decode locally and query only structurally P2TR scripts, without operator identity checks.
+    pub async fn get_script(&self, raw: &str) -> anyhow::Result<crate::script::ScriptResult> {
+        use crate::script::{LookupStatus, ScriptResult, ScriptSummary};
+        let script = ScriptSummary::decode(raw)?;
+        if script.p2tr_output_key.is_none() {
+            return Ok(ScriptResult::unsupported(script));
+        }
+        let vtxos = self.get_script_vtxos(vec![script.hex.clone()]).await?;
+        Ok(ScriptResult { script, lookup_status: LookupStatus::Complete, vtxos: Some(vtxos) })
+    }
+
+    async fn get_script_vtxos(&self, scripts: Vec<String>) -> anyhow::Result<Vec<IndexerVtxo>> {
+        use anyhow::Context;
         let mut vtxos = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut cursor = 0;
@@ -105,7 +121,7 @@ impl IndexerClient {
             }
             cursor = next;
         }
-        Ok(AddressResult { address: raw.to_string(), scripts, vtxos })
+        Ok(vtxos)
     }
 
     /// Fetch the VTXO at `outpoint`, or `Ok(None)` if the indexer has no record.
@@ -249,6 +265,22 @@ mod tests {
         let server = MockServer::start().await;
         for invalid in ["bad".into(), TXID.to_uppercase(), "g".repeat(64)] {
             assert!(client(&server.uri()).get_virtual_tx(&invalid).await.is_err());
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn script_malformed_and_unsupported_inputs_never_send_http() {
+        let server = MockServer::start().await;
+        let client = client(&server.uri());
+        for raw in ["g0", "0", "4c02ff"] {
+            assert!(client.get_script(raw).await.is_err());
+        }
+        for raw in ["", "6A", "4c0101", "52020000"] {
+            let result = client.get_script(raw).await.unwrap();
+            let json = serde_json::to_value(result).unwrap();
+            assert_eq!(json["lookup_status"], "unsupported");
+            assert!(json["vtxos"].is_null());
         }
         assert!(server.received_requests().await.unwrap().is_empty());
     }

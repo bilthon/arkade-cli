@@ -72,6 +72,36 @@ P2TR script), and `vtxos`,
 including full identifiers and all SDK-known fields. These are indexer records,
 not a spendable balance or an atomic snapshot across pages.
 
+Decode script bytecode and look up P2TR VTXOs:
+
+```sh
+akcli script 512025a43cecfa0e1b1a4f72d64ad15f4cfa7a84d0723e8511c969aa543638ea9967
+akcli --json script 6A
+akcli script ''
+```
+
+`script` reports canonical lowercase hex, standard script type (or `unknown`),
+ASM, optional witness version, and the full P2TR output key bytes. Uppercase hex,
+empty bytecode and nonminimal pushes are accepted; malformed hex and truncated
+push instructions fail before configuration loading, HTTP or result output.
+This is structural decoding, **not** script execution, signature verification,
+curve-key validation, ownership or spendability proof. No internal key, script
+tree or network is inferred.
+
+Only P2TR scripts trigger lookup: one canonical script filter, no status filter,
+no `/v1/info` identity check. All pages are buffered using the same checks and
+status table as `address`; failures produce no partial result. Non-P2TR scripts
+succeed locally without loading configuration or making HTTP requests, even
+when operator configuration is absent or malformed. No `--decode-only` flag is
+needed or supported.
+
+JSON contains `script` (`hex`, `type`, `asm`, `witness_version`,
+`p2tr_output_key`), `lookup_status`, and `vtxos`, retaining full identifiers and
+SDK-known records. Unsupported lookup is `"lookup_status": "unsupported"` with
+`"vtxos": null`, not an empty result. Completed P2TR lookup is
+`"lookup_status": "complete"` with a VTXO array (possibly `[]`). Both succeed
+with exit 0; the human report explicitly distinguishes unsupported from empty.
+
 Inspect a single VTXO by outpoint:
 
 ```sh
@@ -122,11 +152,11 @@ errors with no partial result.
 Global flags: `--operator <url>`, `--json`, `--color always|never|auto`
 (default `auto`: colors only on a TTY and honors `NO_COLOR`), and
 `--timeout <seconds>` (default 10). Amounts are shown with thousands separators
-and a BTC equivalent (except address and virtual transaction output tables, which use sats only), and timestamps as UTC with the raw unix value in
+and a BTC equivalent (except address, script and virtual transaction output tables, which use sats only), and timestamps as UTC with the raw unix value in
 parentheses. `--color always` overrides `NO_COLOR`; `--color never` disables color.
 JSON output is never colored.
 
-In `address` and `vtxo` human views, explicit `spent` makes the entire status
+In `address`, `script` and `vtxo` human views, explicit `spent` makes the entire status
 text red, including all flags and separators, but never padding, labels, or
 other columns. Otherwise, `unspent` is green; when also `preconfirmed`, both
 words are blue, and `swept` is independently red. Missing spent state is
@@ -147,7 +177,7 @@ output says so.
 
 | Code | Meaning |
 | ---- | ------- |
-| 0 | Requested information, record, or address list printed (including an empty list) |
+| 0 | Requested information, record, or list printed (including empty lists and unsupported local script lookup) |
 | 1 | Error (bad input, missing operator, transport/HTTP failure) |
 | 2 | No VTXO, commitment transaction, or virtual transaction found at the selected operator |
 
@@ -155,7 +185,8 @@ output says so.
 
 Implemented: operator information (`info`), address VTXO listing (`address`),
 one VTXO (`vtxo`), one commitment transaction (`tx`), and virtual transaction
-PSBT inspection (`virtual-tx`). Ancestry tracing is not implemented yet.
+PSBT inspection (`virtual-tx`), and script inspection (`script`). Ancestry tracing
+is not implemented yet.
 
 Built on the official [Arkade Rust SDK](https://github.com/arkade-os/rust-sdk)
 (`ark-rest` and `ark-core`, pinned to the same revision).
