@@ -1,2 +1,9 @@
 # Local Pi runtime state
 .atl/
+
+# Rust build artifacts
+/target/
+
+# Private local development notes
+/odd/tasks/
+/CONCEPT.md
