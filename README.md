@@ -7,13 +7,24 @@ It is **read-only**: no signing, no seed phrases, no wallet, no service startup.
 
 ## Install
 
+v0.1.0 is a source-only release: no precompiled binaries or crates.io package.
+Prerequisites: a recent Rust toolchain with Cargo, and Git. Tested with Rust
+1.95.0; this is not a declared minimum supported Rust version (MSRV).
+
+Once the v0.1.0 release is published, install the tagged source:
+
 ```sh
-cargo install --path .
-# or run from the repo:
-cargo run -- vtxo <txid>:<vout> --operator http://localhost:7071
+cargo install --git https://github.com/bilthon/arkade-cli --tag v0.1.0 --locked arkade-cli
 ```
 
-The binary is named `akcli`.
+Alternatively, install from the root of a local source checkout:
+
+```sh
+cargo install --locked --path .
+```
+
+The package is named `arkade-cli`; the installed binary is `akcli`.
+Ensure Cargo's bin directory is on your `PATH`.
 
 ## Configuration
 
