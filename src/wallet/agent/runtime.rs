@@ -21,7 +21,7 @@ pub(super) const IO_DEADLINE: Duration = Duration::from_secs(2);
 
 pub(super) struct Runtime {
     directory: OwnedFd,
-    lock: OwnedFd,
+    lock: Option<OwnedFd>,
     pub(super) socket: PathBuf,
     owned_socket: Option<(u64, u64)>,
 }
@@ -51,6 +51,10 @@ fn identity(s: &fs::Stat) -> (u64, u64) {
 }
 impl Runtime {
     pub(super) fn open(agent: &Agent) -> Result<Self, Error> {
+        Self::open_mode(agent, true)
+    }
+
+    fn open_mode(agent: &Agent, create: bool) -> Result<Self, Error> {
         let socket = agent.home.join(".akcli/run").join(SOCKET);
         if socket.as_os_str().as_bytes().len() >= 104
             || agent
@@ -63,12 +67,17 @@ impl Runtime {
         let mut directory =
             fs::open(&agent.home, DIRECTORY, Mode::empty()).map_err(|_| Error::Runtime)?;
         for (name, parent) in [(".akcli", true), ("run", false)] {
-            match fs::mkdirat(&directory, name, Mode::from_raw_mode(0o700)) {
-                Ok(()) | Err(rustix::io::Errno::EXIST) => (),
-                Err(_) => return Err(Error::Runtime),
+            if create {
+                match fs::mkdirat(&directory, name, Mode::from_raw_mode(0o700)) {
+                    Ok(()) | Err(rustix::io::Errno::EXIST) => (),
+                    Err(_) => return Err(Error::Runtime),
+                }
             }
             directory = fs::openat(&directory, name, DIRECTORY, Mode::empty())
-                .map_err(|_| Error::Runtime)?;
+                .map_err(|error| match error {
+                    rustix::io::Errno::NOENT if !create => Error::Absent,
+                    _ => Error::Runtime,
+                })?;
             check(
                 &fs::fstat(&directory).map_err(|_| Error::Runtime)?,
                 FileType::Directory,
@@ -76,6 +85,25 @@ impl Runtime {
             )?;
         }
         let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        if !create {
+            // Read-side calls never publish a lock, but still reject an unsafe
+            // existing lock rather than treating corrupt runtime state as absent.
+            let lock = match fs::openat(&directory, "agent.lock", flags, Mode::empty()) {
+                Ok(lock) => {
+                    let stat = fs::fstat(&lock).map_err(|_| Error::Runtime)?;
+                    check(&stat, FileType::RegularFile, false)?;
+                    if stat.st_nlink != 1 { return Err(Error::Runtime); }
+                    Some(lock)
+                }
+                Err(rustix::io::Errno::NOENT) => None,
+                Err(_) => return Err(Error::Runtime),
+            };
+            let runtime = Self { directory, lock, socket, owned_socket: None };
+            if runtime.lock.is_none() && runtime.socket_stat()?.is_some() {
+                return Err(Error::Runtime);
+            }
+            return Ok(runtime);
+        }
         // Explicit exclusive publication avoids Darwin's concurrent O_CREAT /
         // O_NOFOLLOW open race; the existing-file path never creates or truncates.
         let lock = match fs::openat(
@@ -98,7 +126,7 @@ impl Runtime {
         }
         Ok(Self {
             directory,
-            lock,
+            lock: Some(lock),
             socket,
             owned_socket: None,
         })
@@ -135,7 +163,11 @@ impl Runtime {
         }
     }
     pub(super) async fn bind(&mut self) -> Result<UnixListener, Error> {
-        fs::flock(&self.lock, FlockOperation::NonBlockingLockExclusive).map_err(|_| Error::Busy)?;
+        fs::flock(
+            self.lock.as_ref().ok_or(Error::Runtime)?,
+            FlockOperation::NonBlockingLockExclusive,
+        )
+        .map_err(|_| Error::Busy)?;
         // Even incompatible/unresponsive live listeners are preserved. Only a
         // definite absence/refusal, while holding the stable lock, allows cleanup.
         if self.connect().await?.is_some() {
@@ -262,9 +294,9 @@ pub(super) async fn call(
     op: u8,
     unlock: Option<(&crate::wallet::WalletName, &crate::wallet::Secret)>,
 ) -> Result<Status, Error> {
-    let runtime = Runtime::open(agent)?;
+    let runtime = Runtime::open_mode(agent, false)?;
     timeout(Duration::from_secs(30), async {
-        let mut stream = runtime.connect().await?.ok_or(Error::Runtime)?;
+        let mut stream = runtime.connect().await?.ok_or(Error::Absent)?;
         // Authentication preceded constructing/writing the secret frame.
         let bytes = protocol::request(op, unlock)?;
         protocol::write(&mut stream, &bytes).await?;

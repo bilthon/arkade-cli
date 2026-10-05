@@ -2,7 +2,8 @@
 
 The local agent retains **one** unlocked mnemonic in memory. It does not derive
 keys, sign, access an operator, or return mnemonic material. Interactive wallet
-commands and TOML configuration are W3 work, not implemented here.
+commands and wallet-only TOML configuration are described in
+[wallet-cli.md](wallet-cli.md). They do not require operator configuration.
 
 ## Interface and lease
 
@@ -14,7 +15,13 @@ The async interface is `ensure_running`, `unlock(&WalletName, Secret)`, `status`
 `lock`, and `stop`. Call `ensure_running` before unlocking. It launches the current
 executable, which must dispatch `agent::internal_entry()` before normal startup.
 An existing agent keeps its original options; changing the lease requires restart.
-`status` and `unlock` return only `Locked` or `Unlocked(public_wallet_name)`.
+Successful `status` and `unlock` return only `Locked` or
+`Unlocked(public_wallet_name)`. Calls return typed `Error::Absent` for proven
+runtime-directory/socket absence or connection refusal. They no longer create
+runtime directories or lock files. Existing unsafe directories, locks, sockets,
+authentication failures and unavailable runtimes remain errors, not absence.
+The CLI maps absence to stopped/locked status and idempotent lock/stop success;
+none of these commands launches a daemon.
 Passwords are nonempty UTF-8, at most 4096 bytes. W1's password semantics and
 fixed Argon2id profile remain unchanged.
 

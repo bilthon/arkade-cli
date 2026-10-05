@@ -2,14 +2,16 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use arkade_cli::config;
 use arkade_cli::indexer::IndexerClient;
 use arkade_cli::outpoint::{self, Outpoint};
 use arkade_cli::render;
 
-/// akcli — a read-only explorer for Arkade virtual transactions and outputs.
+mod wallet_cli;
+
+/// akcli — an Arkade explorer with local encrypted mnemonic storage.
 #[derive(Debug, Parser)]
 #[command(name = "akcli", version, about)]
 struct Cli {
@@ -35,6 +37,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Manage encrypted local wallets (no funds or network operations).
+    Wallet {
+        #[command(subcommand)]
+        command: wallet_cli::Command,
+    },
     /// Show operator information and policy.
     Info,
     /// List all indexer VTXOs linked to an Arkade address.
@@ -73,7 +80,22 @@ fn main() -> ExitCode {
 
 #[tokio::main]
 async fn explorer_main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                let _ = error.print();
+                return ExitCode::SUCCESS;
+            }
+            // Parser diagnostics may contain secret text accidentally supplied as
+            // arguments. Never print user-controlled arguments on parse failure.
+            print_safe_usage(error.kind());
+            return ExitCode::from(2);
+        }
+    };
     match run(cli).await {
         Ok(code) => code,
         Err(e) => {
@@ -81,6 +103,32 @@ async fn explorer_main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// Only fresh, application-owned metadata reaches diagnostics. A bounded menu
+// avoids interpreting argv again or trusting context attached to a failed parse.
+fn print_safe_usage(kind: clap::error::ErrorKind) {
+    use clap::error::ErrorKind;
+    let summary = match kind {
+        ErrorKind::MissingRequiredArgument => "missing required argument",
+        ErrorKind::MissingSubcommand => "missing required command",
+        ErrorKind::UnknownArgument => "unknown argument",
+        ErrorKind::InvalidSubcommand => "unknown command",
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => "invalid argument value",
+        ErrorKind::ArgumentConflict => "conflicting arguments",
+        _ => "invalid command arguments",
+    };
+    eprintln!("error: {summary}\n\nCommand usage (required arguments in angle brackets):");
+    fn menu(command: &mut clap::Command) {
+        eprintln!("{}", command.render_usage());
+        for child in command.get_subcommands_mut().filter(|c| !c.is_hide_set()) {
+            menu(child);
+        }
+    }
+    let mut command = Cli::command().bin_name("akcli");
+    command.build();
+    menu(&mut command);
+    eprintln!("\nUse akcli <command> --help (or akcli wallet <command> --help) for details.");
 }
 
 fn configured_operator(cli: &Cli) -> anyhow::Result<String> {
@@ -94,6 +142,10 @@ fn configured_operator(cli: &Cli) -> anyhow::Result<String> {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    if let Command::Wallet { command } = &cli.command {
+        wallet_cli::run(command, cli.json).await?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let color = render::should_color(
         Some(cli.color.as_str()),
         std::env::var_os("NO_COLOR").is_some(),
@@ -107,6 +159,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
     let operator = configured_operator(&cli)?;
     match cli.command {
+        Command::Wallet { .. } => unreachable!("wallet command handled before configuration"),
         Command::Script { .. } => unreachable!("script command handled before configuration"),
         Command::Info => {
             let client = IndexerClient::new(&operator, Duration::from_secs(cli.timeout))?;

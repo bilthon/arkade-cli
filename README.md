@@ -3,7 +3,9 @@
 A small, read-only explorer for Arkade virtual transactions and outputs — think
 of the exploratory convenience of `bitcoin-cli`, but for Arkade VTXOs.
 
-It is **read-only**: no signing, no seed phrases, no wallet, no service startup.
+Explorer commands are **read-only**. Local `wallet` commands additionally store
+encrypted BIP39 mnemonics and manage a private, on-demand memory agent. This is a
+wallet foundation only: no funds, signing, derivation, balance, or addresses.
 
 ## Install
 
@@ -39,6 +41,41 @@ Example `~/.akcli/config.toml`:
 ```toml
 operator = "http://localhost:7071"
 ```
+
+## Local encrypted wallets
+
+```sh
+akcli wallet create personal            # 12 English words (default)
+akcli wallet create long-backup --words 24
+akcli wallet import existing
+akcli wallet list
+akcli wallet unlock personal
+akcli wallet status
+akcli wallet lock
+akcli wallet agent stop
+```
+
+Create, import, and unlock require a controlling terminal; passwords and imported
+phrases are hidden. Never put secrets in arguments or environment variables.
+Creation defaults to 12 English words; use `--words 24` for 24 words (creation
+only). It saves the encrypted file **before** explicitly displaying the new
+phrase on the terminal. Cancelling after publication retains that file,
+even without backup acknowledgement. No command exports a stored phrase.
+
+Wallet commands require an absolute `HOME`, not an operator. `--json` contains
+only public names/results/status; it never contains passwords or phrases.
+The file password is **not** a BIP39 passphrase, and a mnemonic alone is not a
+guaranteed complete recovery backup. See [wallet usage and limits](docs/wallet-cli.md).
+
+Optional configuration in `~/.akcli/config.toml`:
+
+```toml
+[wallet]
+idle_timeout_seconds = 600
+```
+
+Only unlock reads these settings (integer 1–86400, default 600). An existing agent
+keeps its original timeout: explicitly stop it, then unlock to apply changes.
 
 ## Usage
 
@@ -188,16 +225,18 @@ output says so.
 
 | Code | Meaning |
 | ---- | ------- |
-| 0 | Requested information, record, or list printed (including empty lists and unsupported local script lookup) |
+| 0 | Successful command, including wallet operations, empty lists and unsupported local script lookup |
 | 1 | Error (bad input, missing operator, transport/HTTP failure) |
-| 2 | No VTXO, commitment transaction, or virtual transaction found at the selected operator |
+| 2 | Command-line syntax error, or no VTXO, commitment transaction, or virtual transaction found at the selected operator |
 
 ## Status
 
 Implemented: operator information (`info`), address VTXO listing (`address`),
 one VTXO (`vtxo`), one commitment transaction (`tx`), and virtual transaction
 PSBT inspection (`virtual-tx`), and script inspection (`script`). Ancestry tracing
-is not implemented yet.
+is not implemented yet. Encrypted named mnemonic storage and interactive local
+wallet-agent commands are also available on macOS/Linux; they do not yet provide
+an operational funds wallet.
 
 Built on the official [Arkade Rust SDK](https://github.com/arkade-os/rust-sdk)
 (`ark-rest` and `ark-core`, pinned to the same revision).

@@ -80,9 +80,94 @@ pub fn resolve_operator(
         .ok_or_else(|| ConfigError::MissingOperator(config_display_path.to_string()))
 }
 
+/// Wallet-only settings. Unrelated explorer fields are deliberately ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct WalletSettings {
+    pub idle_timeout_seconds: u64,
+}
+
+impl Default for WalletSettings {
+    fn default() -> Self {
+        Self {
+            idle_timeout_seconds: 600,
+        }
+    }
+}
+
+/// Errors intentionally do not include TOML source text or values.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid or unavailable wallet configuration")]
+pub struct WalletConfigError;
+
+pub fn parse_wallet_settings(contents: &str) -> Result<WalletSettings, WalletConfigError> {
+    #[derive(Default, Deserialize)]
+    struct WalletConfig {
+        #[serde(default)]
+        wallet: WalletSettings,
+    }
+    let settings = toml::from_str::<WalletConfig>(contents)
+        .map_err(|_| WalletConfigError)?
+        .wallet;
+    if !(1..=86_400).contains(&settings.idle_timeout_seconds) {
+        return Err(WalletConfigError);
+    }
+    Ok(settings)
+}
+
+/// Called only by unlock, with an explicit absolute home supplied by the CLI.
+pub fn load_wallet_settings(home: &Path) -> Result<WalletSettings, WalletConfigError> {
+    if !home.is_absolute() {
+        return Err(WalletConfigError);
+    }
+    match std::fs::read_to_string(home.join(".akcli/config.toml")) {
+        Ok(contents) => parse_wallet_settings(&contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(WalletSettings::default()),
+        Err(_) => Err(WalletConfigError),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wallet_defaults_and_bounds() {
+        assert_eq!(parse_wallet_settings("").unwrap().idle_timeout_seconds, 600);
+        for seconds in [1, 600, 86_400] {
+            let settings = parse_wallet_settings(&format!(
+                "[wallet]\nidle_timeout_seconds = {seconds}"
+            )).unwrap();
+            assert_eq!(settings.idle_timeout_seconds, seconds);
+        }
+        for value in ["0", "86401", "-1", "1.5", "true", "\"600\""] {
+            assert!(parse_wallet_settings(&format!(
+                "[wallet]\nidle_timeout_seconds = {value}"
+            )).is_err());
+        }
+    }
+
+    #[test]
+    fn wallet_loader_ignores_operator_types_and_sanitizes_errors() {
+        let settings = parse_wallet_settings(
+            "operator = 42\n[wallet]\nidle_timeout_seconds = 17"
+        ).unwrap();
+        assert_eq!(settings.idle_timeout_seconds, 17);
+        assert!(parse_config("operator = 42").is_err());
+        assert!(parse_config(
+            "operator = 'http://example.invalid'\n[wallet]\nidle_timeout_seconds = 'invalid'"
+        ).is_ok());
+        let error = parse_wallet_settings(
+            "[wallet]\nidle_timeout_seconds = 'synthetic-marker'"
+        ).unwrap_err();
+        assert!(!error.to_string().contains("synthetic-marker"));
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_wallet_settings(home.path()).unwrap(),
+            WalletSettings::default()
+        );
+        assert!(load_wallet_settings(Path::new("relative")).is_err());
+    }
 
     fn cfg(operator: Option<&str>) -> Config {
         Config {

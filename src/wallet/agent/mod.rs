@@ -19,6 +19,8 @@ pub enum Error {
     Options,
     #[error("unsafe or unavailable agent runtime")]
     Runtime,
+    #[error("wallet agent is not running")]
+    Absent,
     #[error("agent protocol or authentication failure")]
     Protocol,
     #[error("agent request timed out")]
