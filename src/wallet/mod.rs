@@ -1,5 +1,7 @@
 //! Encrypted mnemonic storage. No seed derivation or operational wallet interface.
 
+pub mod agent;
+
 #[cfg(unix)]
 mod fs;
 #[cfg(unix)]

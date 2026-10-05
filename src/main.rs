@@ -64,8 +64,15 @@ enum Command {
     },
 }
 
+fn main() -> ExitCode {
+    if let Some(code) = arkade_cli::wallet::agent::internal_entry() {
+        return code;
+    }
+    explorer_main()
+}
+
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn explorer_main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli).await {
         Ok(code) => code,
