@@ -38,15 +38,31 @@ fn public_commands_ignore_unrelated_configuration_and_preserve_local_script() {
 }
 
 #[test]
-fn missing_name_reports_safe_usage_without_side_effects() {
+fn no_arguments_shows_help_on_stderr() {
+    let home = tempfile::tempdir().unwrap();
+    let output = cli(home.path(), &[]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(error.matches("Usage:").count(), 1);
+    assert!(error.contains("Usage: akcli [OPTIONS] <COMMAND>"));
+    for expected in ["Commands:", "wallet", "Options:", "--help", "--version"] {
+        assert!(error.contains(expected), "missing {expected}: {error}");
+    }
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn missing_name_reports_required_argument_without_side_effects() {
     let home = tempfile::tempdir().unwrap();
     let output = cli(home.path(), &["wallet", "create"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("missing required argument"));
-    assert!(error.contains("Usage: akcli wallet create [OPTIONS] <NAME>"));
-    assert!(error.contains("--help"));
+    assert_eq!(error.matches("Usage:").count(), 1);
+    assert!(error.contains("the following required arguments were not provided:\n  <NAME>"));
+    assert!(error.contains("Usage: akcli wallet create <NAME>"), "{error}");
+    assert!(error.contains("For more information, try '--help'."));
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
 }
 
@@ -153,33 +169,29 @@ fn unsafe_runtime_is_not_absence() {
 }
 
 #[test]
-fn parser_errors_do_not_echo_accidental_secret_arguments() {
+fn invalid_word_counts_are_informative_and_have_no_side_effects() {
     let home = tempfile::tempdir().unwrap();
-    let marker = "synthetic-secret-marker";
+    for value in ["15", "0", "invalid"] {
+        let output = cli(
+            home.path(),
+            &["wallet", "create", "fresh", "--words", value],
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains(&format!("invalid value '{value}' for '--words <WORDS>'")));
+        assert!(error.contains("possible values: 12, 24"));
+    }
     for args in [
-        vec!["wallet", "status", marker],
-        vec!["wallet", "lock", "--password", marker],
-        vec!["wallet", "agent", "stop", "--mnemonic", marker],
-        vec!["wallet", "status", "--color", marker],
-        vec!["--timeout", marker, "wallet", "status"],
-        vec!["wallet", "create", "fresh", "--words", marker],
-        vec!["wallet", "create", marker, "--words", "15"],
-        vec!["wallet", "create", "--words", "0", marker],
-        vec!["wallet", "create", "--words", "24", "fresh", marker],
-        vec!["wallet", "create", "--words", "12", "fresh", "--password", marker],
-        vec!["--operator", marker, "wallet", "create", "--words", "15"],
-        vec![marker, "wallet", "create"],
         vec!["wallet", "create", "fresh", "--words"],
         vec!["wallet", "import", "fresh", "--words", "12"],
     ] {
         let output = cli(home.path(), &args);
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: akcli"));
-        assert!(!String::from_utf8_lossy(&output.stdout).contains(marker));
-        assert!(!String::from_utf8_lossy(&output.stderr).contains(marker));
-        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--words"));
     }
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
 }
 
 #[test]

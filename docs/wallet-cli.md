@@ -102,11 +102,11 @@ Human output uses plain public labels. JSON contains only public data:
 ```
 
 List returns `{"names":[]}` or an array of public names. Create/import/unlock
-return `result` and `name`. No response contains a password or mnemonic. Parser
-failures report a fixed error-category summary and a trusted command-usage menu,
-including required placeholders such as `<NAME>` and a `--help` hint. They exit
-with code 2 and empty stdout, without echoing accidentally supplied arguments. Secret-input flags are not supported; never supply secrets through
-argv, environment, stdin redirection or JSON.
+return `result` and `name`. No response contains a password or mnemonic.
+Help and parse errors use standard Clap output. Parse failures exit with code 2
+and empty stdout; diagnostics can echo invalid arguments. Secret-input flags are
+not supported: enter passwords and mnemonics only at the protected terminal
+prompts, never through argv, environment, stdin redirection or JSON.
 
 Terminal input is noncanonical and no-echo, with fixed-capacity zeroizing buffers.
 Backspace erases removed bytes. Overflow, invalid UTF-8, EOF, Ctrl-C and external
@@ -125,7 +125,7 @@ See [storage](wallet-storage.md) and [agent](wallet-agent.md) for their contract
 Tests use synthetic temporary homes and real controlling PTY sessions, capturing
 stdout/stderr separately without printing secret transcripts on assertion failure.
 They cover default/explicit 12-word and explicit 24-word generation with English
-checksums and private display, safe parsing diagnostics, hidden import/password
+checksums and private display, standard help and parse errors, hidden import/password
 confirmation, all valid import phrase lengths, bounded
 UTF-8 input/editing, duplicate publication, creation acknowledgement/retention,
 cancellation, SIGINT and terminal restoration, no-TTY rejection, independent CLI

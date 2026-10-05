@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 
 use arkade_cli::config;
 use arkade_cli::indexer::IndexerClient;
@@ -80,22 +80,7 @@ fn main() -> ExitCode {
 
 #[tokio::main]
 async fn explorer_main() -> ExitCode {
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(error) => {
-            if matches!(
-                error.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
-                let _ = error.print();
-                return ExitCode::SUCCESS;
-            }
-            // Parser diagnostics may contain secret text accidentally supplied as
-            // arguments. Never print user-controlled arguments on parse failure.
-            print_safe_usage(error.kind());
-            return ExitCode::from(2);
-        }
-    };
+    let cli = Cli::parse();
     match run(cli).await {
         Ok(code) => code,
         Err(e) => {
@@ -103,32 +88,6 @@ async fn explorer_main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-// Only fresh, application-owned metadata reaches diagnostics. A bounded menu
-// avoids interpreting argv again or trusting context attached to a failed parse.
-fn print_safe_usage(kind: clap::error::ErrorKind) {
-    use clap::error::ErrorKind;
-    let summary = match kind {
-        ErrorKind::MissingRequiredArgument => "missing required argument",
-        ErrorKind::MissingSubcommand => "missing required command",
-        ErrorKind::UnknownArgument => "unknown argument",
-        ErrorKind::InvalidSubcommand => "unknown command",
-        ErrorKind::InvalidValue | ErrorKind::ValueValidation => "invalid argument value",
-        ErrorKind::ArgumentConflict => "conflicting arguments",
-        _ => "invalid command arguments",
-    };
-    eprintln!("error: {summary}\n\nCommand usage (required arguments in angle brackets):");
-    fn menu(command: &mut clap::Command) {
-        eprintln!("{}", command.render_usage());
-        for child in command.get_subcommands_mut().filter(|c| !c.is_hide_set()) {
-            menu(child);
-        }
-    }
-    let mut command = Cli::command().bin_name("akcli");
-    command.build();
-    menu(&mut command);
-    eprintln!("\nUse akcli <command> --help (or akcli wallet <command> --help) for details.");
 }
 
 fn configured_operator(cli: &Cli) -> anyhow::Result<String> {
