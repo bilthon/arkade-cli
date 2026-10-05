@@ -29,6 +29,16 @@ bech32 = "0.11"
 base64 = "0.22.1"
 ark-rest = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567" }
 
+argon2 = { version = "=0.5.3", features = ["zeroize"] }
+chacha20poly1305 = "=0.10.1"
+bip39 = { version = "=2.2.2", features = ["zeroize"] }
+getrandom = "=0.3.4"
+zeroize = "=1.9.0"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+
 [dev-dependencies]
+tempfile = "3"
 wiremock = "0.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

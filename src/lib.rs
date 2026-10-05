@@ -8,3 +8,4 @@ pub mod outpoint;
 pub mod render;
 pub mod script;
 pub mod virtual_tx;
+pub mod wallet;
