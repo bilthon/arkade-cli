@@ -1,8 +1,9 @@
 # Wallet storage
 
 The encrypted mnemonic store backs the [local wallet CLI](wallet-cli.md) and agent.
-Receive configuration and storage preparation are library-only (R1); there is no
-receive command, seed derivation, address generation, or funds support yet.
+The private agent receive operation (R2) derives an address and persists its public
+contract through the pinned SDK. There is no public receive CLI yet (R3), and no
+balance, send, sync, swap, or restore support.
 An encrypted mnemonic backup is **not a guarantee of complete wallet recovery**:
 contract, key-index, and swap state may also be required by future integrations.
 
@@ -84,15 +85,15 @@ ignores unrelated child files and legacy top-level `.pending-` entries. No recur
 cleanup, automatic directory removal/reuse, or plaintext recovery is attempted. Filesystems must support ordinary Unix
 permissions, hard links, and directory fsync; network filesystems are not validated.
 
-## Receive storage preparation (R1)
+## Receive storage (R1/R2)
 
 `ReceiveStore::open_existing(home, name)` retains the validated wallet-directory
-descriptor and exposes `database_path()` for later SDK integration. Opening never
+descriptor and exposes `database_path()` for SDK integration. Opening never
 creates missing roots or wallet children. `check_binding(&ReceiveSettings)` reads
 without writes. `initialize(&ReceiveSettings)` rechecks, then writes only receive
 state; callers must validate the operator first. Keep the store alive for the
-future SDK database lifetime. No SQLite dependency or SDK composition is added
-in R1, and no current wallet command calls this API.
+SDK database lifetime. The agent retains it while `SqliteContractStore` and
+`ContractManager` are alive. No public wallet command calls receive yet.
 
 `metadata.json` is strict JSON, bounded to 16 KiB, with exactly these fields:
 
@@ -121,13 +122,20 @@ a database are also rejected. Matching metadata without a DB is a retryable
 partial initialization. Existing state and mnemonic envelopes are never rewritten
 or automatically cleaned up. Publication/sync errors can leave persistent files.
 
-Managed operations remain descriptor-relative, but the future SDK pathname open
-is **not** race-immune against hostile same-user mutation. R2 must set daemon
-umask 0077 for SQLite auxiliaries and retain/revalidate the storage owner around
-SDK use. No SQLite runtime, operator validation, power-loss durability or
-cross-UID fixture is proven here. Tests cover synthetic temporary homes, bounded
-parsing, binding conflicts, partial retries, no-write checks, no-clobber races,
-unsafe files/directories, and descriptor retention across a directory rename.
+The agent validates operator network and session before initialization, rechecks
+all SQLite paths immediately before and after SDK open, then inserts the default
+VTXO contract with `Active` state and `Some(0)` key index. Only a successful
+`insert_or_get` permits address construction. It revalidates storage and session
+before responding. Errors can leave initialized files, but never return an address
+without successful persistence. The encrypted mnemonic envelope is untouched.
+
+Managed operations remain descriptor-relative, but the SDK pathname open is
+**not** race-immune against hostile same-user mutation. The daemon sets umask 0077.
+Tests exercise real SQLite persistence/reopen, WAL/SHM owner-only modes and unsafe
+auxiliary rejection, failed inserts, and no-write operator/binding mismatches,
+in addition to R1's bounded parsing, partial retries, no-clobber races, unsafe
+files/directories, and descriptor retention across a directory rename.
+Power-loss durability, cross-UID fixtures, and physical erasure remain unproven.
 
 ## Secret handling is best effort
 

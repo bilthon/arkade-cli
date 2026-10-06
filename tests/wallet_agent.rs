@@ -79,6 +79,133 @@ impl Drop for Fixture {
     }
 }
 
+// Real SDK transport, local HTTP/2 + official protobuf only; no operator or funds.
+async fn mock_info() -> (String, tokio::task::JoinHandle<()>) {
+    use prost::Message;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+            assert_eq!(request.uri().path(), "/ark.v1.ArkService/GetInfo");
+            let signer: bitcoin::secp256k1::PublicKey =
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                    .parse()
+                    .unwrap();
+            let message = ark_grpc::test_utils::GetInfoResponse {
+                signer_pubkey: signer.to_string(),
+                forfeit_pubkey: signer.to_string(),
+                forfeit_address: bitcoin::Address::p2tr(
+                    &bitcoin::secp256k1::Secp256k1::new(),
+                    signer.x_only_public_key().0,
+                    None,
+                    bitcoin::Network::Regtest,
+                )
+                .to_string(),
+                network: "regtest".into(),
+                unilateral_exit_delay: 144,
+                boarding_exit_delay: 144,
+                ..Default::default()
+            }
+            .encode_to_vec();
+            let mut body = vec![0];
+            body.extend_from_slice(&(message.len() as u32).to_be_bytes());
+            body.extend_from_slice(&message);
+            let mut response = respond
+                .send_response(
+                    http::Response::builder()
+                        .header("content-type", "application/grpc")
+                        .body(())
+                        .unwrap(),
+                    false,
+                )
+                .unwrap();
+            response.send_data(body.into(), false).unwrap();
+            let mut trailers = http::HeaderMap::new();
+            trailers.insert("grpc-status", "0".parse().unwrap());
+            response.send_trailers(trailers).unwrap();
+            // Keep polling the connection until the one-request SDK client drops it.
+            while connection.accept().await.is_some() {}
+        }
+    });
+    (endpoint, task)
+}
+async fn receive_frame(fixture: &Fixture) -> Vec<u8> {
+    let mut stream = UnixStream::connect(fixture.socket()).await.unwrap();
+    stream.write_all(&[0, 0, 0, 2, 1, 5]).await.unwrap();
+    let length = stream.read_u32().await.unwrap();
+    assert!(length <= 514);
+    let mut response = vec![0; length as usize];
+    stream.read_exact(&mut response).await.unwrap();
+    response
+}
+#[tokio::test]
+async fn receive_ipc_uses_real_sdk_local_info_and_reuses_persisted_address() {
+    let fixture = Fixture::new(60);
+    fixture.create("alice");
+    fixture.unlock("alice").await;
+    let (endpoint, mock) = mock_info().await;
+    std::fs::write(
+        fixture.home.path().join(".akcli/config.toml"),
+        format!("[wallet.receive]\nenvironment='regtest'\ngrpc_endpoint='{endpoint}'\n"),
+    )
+    .unwrap();
+    let first = receive_frame(&fixture).await;
+    assert_eq!(&first[..2], &[1, 5]);
+    let address = std::str::from_utf8(&first[2..]).unwrap();
+    assert!(ark_core::ArkAddress::decode(address).is_ok());
+    assert_eq!(receive_frame(&fixture).await, first);
+    mock.await.unwrap();
+    fixture.agent.lock().await.unwrap();
+    assert_eq!(receive_frame(&fixture).await, [1, 4]);
+}
+
+#[tokio::test]
+async fn receive_ipc_network_wait_keeps_controls_responsive_and_lock_cancels() {
+    let fixture = Fixture::new(60);
+    fixture.create("alice");
+    fixture.unlock("alice").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    std::fs::write(
+        fixture.home.path().join(".akcli/config.toml"),
+        format!(
+            "[wallet.receive]\nenvironment='regtest'\ngrpc_endpoint='http://{}'\n",
+            listener.local_addr().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut stream = UnixStream::connect(fixture.socket()).await.unwrap();
+    stream.write_all(&[0, 0, 0, 2, 1, 5]).await.unwrap();
+    let (_socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), fixture.agent.status())
+            .await
+            .unwrap()
+            .unwrap(),
+        Status::Unlocked(WalletName::new("alice").unwrap())
+    );
+    tokio::time::timeout(Duration::from_secs(1), fixture.agent.lock())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut response = [0; 6];
+    tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response, [0, 0, 0, 2, 1, 4]);
+    assert!(!fixture
+        .home
+        .path()
+        .join(".akcli/wallets/alice/metadata.json")
+        .exists());
+}
+
 #[test]
 fn agent_requires_absolute_home_and_bounded_lease() {
     assert!(Agent::new(PathBuf::from("relative"), Options::default()).is_err());

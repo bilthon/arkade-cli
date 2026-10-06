@@ -5,6 +5,8 @@ use std::{path::PathBuf, time::Duration};
 #[cfg(unix)]
 mod protocol;
 #[cfg(unix)]
+mod receive;
+#[cfg(unix)]
 mod runtime;
 #[cfg(unix)]
 mod server;
@@ -29,6 +31,8 @@ pub enum Error {
     Busy,
     #[error("unable to unlock wallet")]
     Unlock,
+    #[error("unable to receive with this wallet session")]
+    Receive,
     #[error("wallet agent is unsupported on this platform")]
     Unsupported,
 }

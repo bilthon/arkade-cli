@@ -13,12 +13,14 @@ pub(super) const STATUS: u8 = 1;
 pub(super) const UNLOCK: u8 = 2;
 pub(super) const LOCK: u8 = 3;
 pub(super) const STOP: u8 = 4;
+pub(super) const RECEIVE: u8 = 5;
 
 pub(super) enum Request {
     Status,
     Unlock(WalletName, Secret),
     Lock,
     Stop,
+    Receive,
 }
 
 pub(super) fn uid_matches(peer: u32, expected: u32) -> Result<(), Error> {
@@ -91,6 +93,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Request, Error> {
         Some(&STATUS) if bytes.len() == 2 => Ok(Request::Status),
         Some(&LOCK) if bytes.len() == 2 => Ok(Request::Lock),
         Some(&STOP) if bytes.len() == 2 => Ok(Request::Stop),
+        Some(&RECEIVE) if bytes.len() == 2 => Ok(Request::Receive),
         Some(&UNLOCK) => {
             let n = *bytes.get(2).ok_or(Error::Protocol)? as usize;
             if !(1..=32).contains(&n) || bytes.len() < 5 + n {
@@ -123,6 +126,18 @@ pub(super) fn response(value: Result<Status, Error>) -> Vec<u8> {
         Err(_) => vec![VERSION, 4],
     }
 }
+// Receive success is address-only, with its own tag. Existing status/error
+// encodings are unchanged. R3 will add the client-side address decoder.
+pub(super) fn receive_response(value: Result<String, Error>) -> Vec<u8> {
+    match value {
+        Ok(address) if !address.is_empty() && address.len() <= 512 && address.is_ascii() => {
+            let mut bytes = vec![VERSION, 5];
+            bytes.extend_from_slice(address.as_bytes());
+            bytes
+        }
+        _ => response(Err(Error::Receive)),
+    }
+}
 pub(super) fn parse_response(bytes: &[u8]) -> Result<Status, Error> {
     if bytes.first() != Some(&VERSION) {
         return Err(Error::Protocol);
@@ -144,6 +159,19 @@ pub(super) fn parse_response(bytes: &[u8]) -> Result<Status, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn receive_is_parameterless_and_bounded() {
+        assert!(parse(&[1, 5]).is_ok());
+        assert!(parse(&[1, 5, 0]).is_err());
+        assert_eq!(
+            receive_response(Ok("tark1fixture".into())),
+            b"\x01\x05tark1fixture"
+        );
+        for invalid in [String::new(), "x".repeat(513), "é".into()] {
+            assert_eq!(receive_response(Ok(invalid)), [1, 4]);
+        }
+        assert_eq!(receive_response(Err(Error::Receive)), [1, 4]);
+    }
     #[test]
     fn malformed_payloads_and_uid_policy() {
         for bytes in [

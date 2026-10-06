@@ -8,6 +8,7 @@ use tokio::time::Instant;
 pub(super) struct State {
     retained: Option<(WalletName, Secret, Instant)>,
     generation: u64,
+    session: tokio::sync::watch::Sender<u64>,
     stopped: bool,
     lease: Duration,
 }
@@ -16,6 +17,7 @@ impl State {
         Self {
             retained: None,
             generation: 0,
+            session: tokio::sync::watch::channel(0).0,
             stopped: false,
             lease,
         }
@@ -23,6 +25,7 @@ impl State {
     pub(super) fn expire(&mut self) {
         if self.deadline().is_some_and(|d| Instant::now() >= d) {
             self.retained = None;
+            self.invalidate_session();
         }
     }
     pub(super) fn deadline(&self) -> Option<Instant> {
@@ -42,10 +45,30 @@ impl State {
         if self.ticket() != Some(ticket) {
             return false;
         }
+        self.invalidate_session();
         self.retained = Some((name, mnemonic, Instant::now() + self.lease));
         true
     }
+    fn invalidate_session(&self) {
+        self.session.send_modify(|id| *id = id.wrapping_add(1));
+    }
+    pub(super) fn receive_session(
+        &mut self,
+    ) -> Option<(WalletName, Instant, tokio::sync::watch::Receiver<u64>)> {
+        self.expire();
+        self.retained
+            .as_ref()
+            .map(|(name, _, deadline)| (name.clone(), *deadline, self.session.subscribe()))
+    }
+    pub(super) fn mnemonic(&mut self, session: u64) -> Option<&Secret> {
+        self.expire();
+        if *self.session.borrow() != session {
+            return None;
+        }
+        self.retained.as_ref().map(|r| &r.1)
+    }
     pub(super) fn lock(&mut self, stop: bool) {
+        self.invalidate_session();
         self.generation = self.generation.wrapping_add(1);
         self.retained = None;
         self.stopped |= stop;
@@ -61,6 +84,28 @@ mod tests {
             WalletName::new(name).unwrap(),
             Secret::new("synthetic mnemonic".into())
         ));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn expiry_invalidates_receive_but_not_in_flight_unlock_ticket() {
+        let mut state = State::new(Duration::from_secs(10));
+        install(&mut state, "alice");
+        let (_, _, mut receive) = state.receive_session().unwrap();
+        let identity = *receive.borrow_and_update();
+        let ticket = state.ticket().unwrap();
+        tokio::time::advance(Duration::from_secs(10)).await;
+        state.expire();
+        assert!(receive.has_changed().unwrap());
+        assert!(state.mnemonic(identity).is_none());
+        assert!(state.install(
+            ticket,
+            WalletName::new("bob").unwrap(),
+            Secret::new("replacement".into())
+        ));
+        assert_eq!(
+            state.status(),
+            Status::Unlocked(WalletName::new("bob").unwrap())
+        );
+        assert!(state.mnemonic(identity).is_none());
     }
     #[tokio::test(start_paused = true)]
     async fn exact_expiry_status_failure_and_replacement() {

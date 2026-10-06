@@ -1,7 +1,9 @@
-# Private wallet agent (W2 foundation)
+# Private wallet agent
 
-The local agent retains **one** unlocked mnemonic in memory. It does not derive
-keys, sign, access an operator, or return mnemonic material. Interactive wallet
+The local agent retains **one** unlocked mnemonic in memory. Its private receive
+operation derives a fixed-index address through the pinned SDK and persists the
+public contract before responding. It does not sign, sync, or return mnemonic
+material. The public receive CLI is not available yet (R3). Interactive wallet
 commands and wallet-only TOML configuration are described in
 [wallet-cli.md](wallet-cli.md). They do not require operator configuration.
 
@@ -30,7 +32,7 @@ monotonic deadline. A failed unlock preserves the previous wallet **without
 renewing its deadline**. Status does not renew it either. An independent active
 maintenance future drops retained material at expiry, even without client calls
 and while a blocking KDF runs. Lock and stop are global. Restart always begins
-locked. No key-use operation exists yet.
+locked. Receive never renews the deadline.
 
 ## Process and filesystem lifecycle
 
@@ -85,18 +87,21 @@ checks before reading a request. Same-UID processes are within the trust domain;
 this is not authentication against malware running as the wallet owner.
 
 The private v1 protocol uses a four-byte big-endian payload length, then version
-and opcode bytes. Status/lock/stop have no further payload. Unlock carries a
+and opcode bytes. Status/lock/stop/receive have no further payload. Unlock carries a
 one-byte name length, validated ASCII name, two-byte password length, and UTF-8
 password. Maximum payload size is 4133 bytes. Frames are allocated at their exact
 validated size under `Zeroizing<Vec<u8>>` before receiving secret bytes and never
 grow afterward. Password ownership moves into W1's `Secret`. Parsing errors own
 no input; fixed error responses contain no secret or filesystem details.
 Responses contain only version, a fixed result code, and optionally a validated
-public wallet name. This is not JSON and is not a stable external protocol.
+public wallet name. Receive uses opcode 5; its success payload is version 1,
+result code 5, and an ASCII address (1–512 bytes), with no mnemonic or backend
+error text. Failure uses the existing generic code 4. Existing response encodings
+are unchanged. This is not JSON and is not a stable external protocol.
 
 There is one request per connection, no pipelining. Payload length must match its
 schema exactly. Trailing bytes already available are rejected; any further data
-or EOF during unlock cancels that request. Bytes sent only after a completed
+or EOF during unlock or receive cancels that request. Bytes sent only after a completed
 control response cannot retroactively invalidate that completed request.
 
 Limits are 32 accepted request tasks, a two-second whole-frame read deadline,
@@ -111,6 +116,43 @@ invalidates first, rejects further work, cancels request tasks, then waits for
 the one possible worker to finish and drop its result before releasing the lock.
 Control requests and expiry do not wait for the KDF.
 
+## Receive lifecycle (R2)
+
+Each receive reloads `[wallet.receive]` from the agent's absolute home. It checks
+existing storage/binding without writes, fetches operator info with `ark_grpc`,
+checks the configured Bitcoin network family, and revalidates the session before
+initialization. Explicit Signet/Mutinynet bindings remain distinct locally; typed
+SDK info cannot distinguish them remotely. No explorer endpoint is reused.
+
+A request-local `Bip32KeyProvider` derives normal index 0 at the SDK default path
+`m/83696968'/11811'/0`, using an empty BIP39 passphrase and explicit network.
+No mnemonic copy, seed, or provider is held across network waits. The retained
+mnemonic is borrowed only during synchronous derivation; seed bytes are zeroized.
+The provider is dropped immediately after extracting the public owner key. This
+avoids a long-lived key cache and cursor. Repeated calls reuse the address unless
+operator signer/policy changes. See [wallet-storage.md](wallet-storage.md).
+
+Receive operations serialize within the existing 32-connection admission limit;
+there is no separate unbounded job queue. Status, lock, and unlock bypass that
+serialization. No coordinator mutex is held during network or SQLite waits.
+A separate session identity changes on successful unlock/replacement, expiry,
+lock, and stop. Expiry does **not** invalidate an in-flight KDF's unlock ticket;
+failed unlock does not invalidate the current receive session.
+
+Session changes, lease expiry, disconnect, and the existing 25-second request
+budget cancel waiting receive futures. There is no detached key-bearing receive
+worker. SQLite calls are synchronous: cancellation cannot preempt a running
+SQLite call or guarantee instantaneous physical erasure. The request rechecks
+session validity after persistence and discards stale results. A canceled request
+can therefore leave a valid public contract but return no address. A response
+completed before a later lock is not retroactively revoked.
+
+Tests cover real localhost HTTP/2/protobuf info through the SDK and actual Unix
+IPC, index-0 persistence/reopen reuse, a pinned-SDK golden address with independent
+BIP32 path verification, mismatches before writes, failed inserts, actual SQLite
+WAL/SHM permissions, serialization, unchanged leases, and deterministic pending
+request cancellation on every session transition, timeout, and caller drop.
+
 ## Security limits and verification
 
 Zeroization is best effort for retained mnemonics, passwords, frames, decrypted
@@ -119,7 +161,9 @@ work **cannot be cancelled**: lock, stop, timeout, or disconnect does not promis
 instant erasure of worker-held passwords/scratch. Fixed KDF parameters bound
 work and memory, not elapsed wall-clock time. There is no protection against
 same-user malware, a compromised kernel, privileged inspection, kernel socket
-copies, swap, core dumps, or all compiler/runtime copies.
+copies, swap, core dumps, or all compiler/runtime copies. SDK provider/Xpriv/keypair
+internals do not promise zeroization of every private-key copy; their short
+synchronous scope bounds ownership lifetime, not physical memory recovery.
 
 Tests use only synthetic fixtures in short temporary homes. Coverage includes
 fake-clock exact/active expiry, failed/replacement unlock semantics, deferred
