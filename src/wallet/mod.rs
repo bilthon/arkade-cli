@@ -3,6 +3,9 @@
 pub mod agent;
 
 #[cfg(unix)]
+pub mod balance;
+
+#[cfg(unix)]
 mod fs;
 #[cfg(unix)]
 mod receive_store;

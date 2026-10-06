@@ -48,6 +48,11 @@ impl ReceiveStore {
         self.inspect(settings).map(|_| ())
     }
 
+    /// Whether both binding and database exist, after validating every SQLite path.
+    pub(crate) fn is_initialized(&self, settings: &ReceiveSettings) -> Result<bool, Error> {
+        self.inspect(settings).map(|(metadata, database)| metadata && database)
+    }
+
     // Return presence only after validating all files. No unknown database is adopted.
     fn inspect(&self, settings: &ReceiveSettings) -> Result<(bool, bool), Error> {
         let metadata = self.directory.read_file("metadata.json")?;

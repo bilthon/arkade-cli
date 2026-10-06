@@ -91,7 +91,7 @@ impl IndexerClient {
         Ok(ScriptResult { script, lookup_status: LookupStatus::Complete, vtxos: Some(vtxos) })
     }
 
-    async fn get_script_vtxos(&self, scripts: Vec<String>) -> anyhow::Result<Vec<IndexerVtxo>> {
+    pub(crate) async fn get_script_vtxos(&self, scripts: Vec<String>) -> anyhow::Result<Vec<IndexerVtxo>> {
         use anyhow::Context;
         let mut vtxos = Vec::new();
         let mut seen = std::collections::HashSet::new();
