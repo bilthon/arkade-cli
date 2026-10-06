@@ -47,6 +47,24 @@ pub enum Error {
         "unsafe or incompatible receive storage binding; check operator and wallet association"
     )]
     ReceiveStorage,
+    #[error("wallet session unavailable or changed; unlock and retry balance")]
+    BalanceSession,
+    #[error("set the configured REST operator before reading balance")]
+    BalanceMissingOperator,
+    #[error("invalid balance configuration; use an HTTP(S) operator without credentials, query or fragment")]
+    BalanceConfig,
+    #[error("receive state is missing or incomplete; initialize with wallet receive")]
+    BalanceMissingState,
+    #[error("unsafe or incompatible balance storage or contract; check wallet and operator association")]
+    BalanceStorage,
+    #[error("cannot obtain valid operator information; check configuration, connectivity and compatibility")]
+    BalanceOperator,
+    #[error("balance query failed; check operator availability and compatibility, then retry")]
+    BalanceQuery,
+    #[error("invalid, duplicate or overflowing balance response; check operator compatibility")]
+    BalanceInvalidResponse,
+    #[error("cannot classify balance with the local clock; check system time")]
+    BalanceClock,
     #[error("wallet agent is unsupported on this platform")]
     Unsupported,
 }
@@ -138,6 +156,20 @@ impl Agent {
         {
             protocol::parse_receive_response(
                 &runtime::call_frame(self, protocol::RECEIVE, None).await?,
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            Err(Error::Unsupported)
+        }
+    }
+    /// Reads operator-reported holdings for the current session. Never starts
+    /// an agent, unlocks a wallet, or renews the lease.
+    pub async fn balance(&self) -> Result<super::balance::Balance, Error> {
+        #[cfg(unix)]
+        {
+            protocol::parse_balance_response(
+                &runtime::call_frame(self, protocol::BALANCE, None).await?,
             )
         }
         #[cfg(not(unix))]

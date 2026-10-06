@@ -406,6 +406,94 @@ async fn receive_ipc_network_wait_keeps_controls_responsive_and_lock_cancels() {
         .exists());
 }
 
+#[tokio::test]
+async fn balance_absent_is_non_creating_and_real_ipc_is_typed_and_fail_closed() {
+    use arkade_cli::wallet::{agent::Error, balance::Balance};
+    use ark_client::{ContractStore, SqliteContractStore};
+    use wiremock::{matchers::path, Mock, ResponseTemplate};
+
+    let absent_home = tempfile::tempdir_in("/tmp").unwrap();
+    let absent = Agent::new(absent_home.path().canonicalize().unwrap(), Options::default()).unwrap();
+    assert!(matches!(absent.balance().await, Err(Error::Absent)));
+    assert!(!absent_home.path().join(".akcli").exists());
+
+    let fixture = Fixture::new(60);
+    assert!(matches!(fixture.agent.balance().await, Err(Error::BalanceSession)));
+    assert!(!fixture.home.path().join(".akcli/wallets").exists());
+    fixture.create("alice");
+    fixture.unlock("alice").await;
+    assert!(matches!(fixture.agent.balance().await, Err(Error::BalanceMissingOperator)));
+    let mock = wiremock::MockServer::start().await;
+    let config = fixture.home.path().join(".akcli/config.toml");
+    std::fs::write(&config, format!("operator='{}'", mock.uri())).unwrap();
+    Mock::given(path("/v1/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(info_body("regtest")))
+        .mount(&mock).await;
+    assert!(matches!(fixture.agent.balance().await, Err(Error::BalanceMissingState)));
+    let dir = fixture.home.path().join(".akcli/wallets/alice");
+    assert!(!dir.join("contracts.db").exists());
+    fixture.agent.receive().await.unwrap();
+    let store = SqliteContractStore::new(dir.join("contracts.db")).unwrap();
+    let before = store.list().unwrap();
+    let script = before[0].script_pubkey.to_hex_string();
+    let record = |id, amount: u64| serde_json::json!({
+        "outpoint": {"txid": "11".repeat(32), "vout": id},
+        "script": script, "amount": amount.to_string(),
+        "createdAt": "1", "expiresAt": "4102444800"
+    });
+    for mode in ["zero", "success", "invalid", "overflow", "duplicate", "query", "operator"] {
+        mock.reset().await;
+        Mock::given(path("/v1/info"))
+            .respond_with(if mode == "operator" {
+                ResponseTemplate::new(503).set_body_string("private-backend-marker")
+            } else {
+                ResponseTemplate::new(200).set_body_json(info_body("regtest"))
+            }).mount(&mock).await;
+        let records = match mode {
+            "zero" => vec![],
+            "overflow" => vec![record(0, u64::MAX), record(1, 1000)],
+            "duplicate" => vec![record(0, 1000), record(0, 1000)],
+            "invalid" => {
+                let mut invalid = record(0, 1000);
+                invalid["amount"] = "private-backend-marker".into();
+                vec![invalid]
+            }
+            _ => vec![record(0, 1000)],
+        };
+        Mock::given(path("/v1/indexer/vtxos"))
+            .respond_with(if mode == "query" {
+                ResponseTemplate::new(500).set_body_string("private-backend-marker")
+            } else {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "vtxos": records, "page": {"next": 0, "total": 0}
+                }))
+            }).mount(&mock).await;
+        let result = fixture.agent.balance().await;
+        match mode {
+            "zero" => assert_eq!(result.unwrap(), Balance::default()),
+            "success" => assert_eq!(result.unwrap(), Balance {
+                offchain_balance_sats: 1000, confirmed_sats: 1000, ..Balance::default()
+            }),
+            "invalid" | "overflow" => assert!(matches!(result, Err(Error::BalanceInvalidResponse))),
+            "duplicate" | "query" => assert!(matches!(result, Err(Error::BalanceQuery))),
+            "operator" => assert!(matches!(result, Err(Error::BalanceOperator))),
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(store.list().unwrap(), before);
+    std::fs::write(&config, "operator='http://private-marker@localhost'").unwrap();
+    assert!(matches!(fixture.agent.balance().await, Err(Error::BalanceConfig)));
+    fixture.agent.lock().await.unwrap();
+    assert!(matches!(fixture.agent.balance().await, Err(Error::BalanceSession)));
+    fixture.agent.stop().await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture.socket().exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(matches!(fixture.agent.balance().await, Err(Error::Absent)));
+}
+
 #[test]
 fn agent_requires_absolute_home_and_bounded_lease() {
     assert!(Agent::new(PathBuf::from("relative"), Options::default()).is_err());

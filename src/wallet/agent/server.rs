@@ -196,6 +196,68 @@ where
     }
 }
 
+fn balance_error(error: crate::wallet::balance::BalanceError) -> Error {
+    use crate::wallet::balance::BalanceError;
+    match error {
+        BalanceError::MissingState => Error::BalanceMissingState,
+        BalanceError::Storage | BalanceError::Contract => Error::BalanceStorage,
+        BalanceError::Operator => Error::BalanceOperator,
+        BalanceError::Query => Error::BalanceQuery,
+        BalanceError::InvalidVtxo | BalanceError::DuplicateOutpoint | BalanceError::Overflow => {
+            Error::BalanceInvalidResponse
+        }
+        BalanceError::Clock => Error::BalanceClock,
+    }
+}
+
+async fn balance(
+    stream: &UnixStream,
+    agent: &Agent,
+    coordinator: &Coordinator,
+) -> Result<crate::wallet::balance::Balance, Error> {
+    let (name, deadline, mut session, identity) = {
+        let mut state = coordinator.state.lock().unwrap();
+        let (name, deadline, session) = state.receive_session().ok_or(Error::BalanceSession)?;
+        let identity = *session.borrow();
+        (name, deadline, session, identity)
+    };
+    let operation = async {
+        // B1 retains its initialization-capable SQLite store across awaits.
+        // Share receive's serialization to protect that lifecycle; controls and
+        // unlock bypass it, and cancellation releases the guard or waiter.
+        let _serial = coordinator.receive.lock().await;
+        let operator = load_receive_settings(&agent.home).map_err(|error| match error {
+            crate::config::ReceiveConfigError::MissingOperator => Error::BalanceMissingOperator,
+            crate::config::ReceiveConfigError::Invalid => Error::BalanceConfig,
+        })?;
+        let result = crate::wallet::balance::read_balance(&agent.home, &name, operator.url())
+            .await
+            .map_err(balance_error);
+        // SQLite is synchronous, not preemptible. Give whole-request budget
+        // cancellation a turn, then discard stale completion before delivery.
+        tokio::task::yield_now().await;
+        still_connected(stream)?;
+        if coordinator.state.lock().unwrap().mnemonic(identity).is_none() {
+            return Err(Error::BalanceSession);
+        }
+        result
+    };
+    let disconnected = async {
+        loop {
+            if stream.readable().await.is_err() || still_connected(stream).is_err() {
+                return;
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = session.changed() => Err(Error::BalanceSession),
+        _ = tokio::time::sleep_until(deadline) => Err(Error::BalanceSession),
+        _ = disconnected => Err(Error::Protocol),
+        result = operation => result,
+    }
+}
+
 struct ChangedOnDrop<'a>(&'a Notify);
 impl Drop for ChangedOnDrop<'_> {
     fn drop(&mut self) {
@@ -216,6 +278,12 @@ async fn handle(
     still_connected(&stream)?;
     let result = match request {
         Request::Status => Ok(coordinator.state.lock().unwrap().status()),
+        Request::Balance => {
+            let result = balance(&stream, &agent, &coordinator).await;
+            // As with receive, session validation and socket writing are not
+            // atomic with a later lock on another connection.
+            return protocol::write(&mut stream, &protocol::balance_response(result)).await;
+        }
         Request::Receive => {
             let result = receive(&mut stream, &agent, &coordinator, |endpoint| async move {
                 receive::operator(&endpoint).await
@@ -593,6 +661,177 @@ mod tests {
         release.send(()).unwrap();
         let address = first.await.unwrap().unwrap();
         assert_eq!(second.await.unwrap().unwrap(), address);
+    }
+
+    async fn balance_fixture() -> (tempfile::TempDir, Agent, Arc<Coordinator>, wiremock::MockServer, String) {
+        let (home, agent, coordinator) = receive_fixture();
+        let mock = wiremock::MockServer::start().await;
+        fs::write(home.path().join(".akcli/config.toml"), format!("operator='{}'", mock.uri())).unwrap();
+        let operator = info().1;
+        wiremock::Mock::given(wiremock::matchers::path("/v1/info"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "synthetic", "signerPubkey": operator.signer_pk.to_string(),
+                "forfeitPubkey": operator.forfeit_pk.to_string(),
+                "forfeitAddress": operator.forfeit_address.to_string(),
+                "network": "regtest", "checkpointTapscript": "",
+                "unilateralExitDelay": "144", "boardingExitDelay": "144",
+                "sessionDuration": "10", "dust": "330",
+                "deprecatedSigners": [{
+                    "pubkey": bitcoin::secp256k1::SecretKey::from_slice(&[3; 32]).unwrap()
+                        .public_key(&bitcoin::secp256k1::Secp256k1::new()).to_string(),
+                    "cutoffDate": "1"
+                }],
+                "maxTxWeight": "0", "maxOpReturnOutputs": "0"
+            })))
+            .mount(&mock).await;
+        let store = ReceiveStore::open_existing(home.path(), &name()).unwrap();
+        let settings = crate::config::ReceiveSettings::new("regtest", &mock.uri()).unwrap();
+        receive::persist(&store, &settings, &operator, operator.signer_pk.x_only_public_key().0).unwrap();
+        let script = SqliteContractStore::new(store.database_path()).unwrap().list().unwrap()[0]
+            .script_pubkey.to_hex_string();
+        (home, agent, coordinator, mock, script)
+    }
+
+    fn balance_record(script: &str, id: u32, amount: u64) -> serde_json::Value {
+        serde_json::json!({
+            "outpoint": {"txid": "11".repeat(32), "vout": id},
+            "script": script, "amount": amount.to_string(),
+            "createdAt": "1", "expiresAt": "4102444800"
+        })
+    }
+
+    #[tokio::test]
+    async fn balance_buckets_include_historical_contracts_without_lease_renewal() {
+        use ark_core::contract::{ContractState, DefaultVtxoContract};
+        use wiremock::{matchers::{path, query_param}, Mock, ResponseTemplate};
+        let (home, agent, coordinator, mock, script) = balance_fixture().await;
+        let store = ReceiveStore::open_existing(home.path(), &name()).unwrap();
+        let mut manager = ark_client::ContractManager::new_with_builtins(Network::Regtest,
+            Box::new(SqliteContractStore::new(store.database_path()).unwrap())).unwrap();
+        let historical = manager.insert_or_get(DefaultVtxoContract {
+            server: bitcoin::secp256k1::SecretKey::from_slice(&[3; 32]).unwrap()
+                .public_key(&bitcoin::secp256k1::Secp256k1::new()).x_only_public_key().0,
+            owner: info().1.signer_pk.x_only_public_key().0,
+            exit_delay: Sequence::from_height(288),
+        }, ContractState::Inactive, Some(0)).unwrap().script_pubkey.to_hex_string();
+        let before = manager.list().unwrap();
+        let mut preconfirmed = balance_record(&script, 1, 2000);
+        preconfirmed["isPreconfirmed"] = true.into();
+        let mut recoverable = balance_record(&script, 2, 3000);
+        recoverable["isSwept"] = true.into();
+        for (script, records) in [
+            (&script, vec![balance_record(&script, 0, 1000), preconfirmed, recoverable]),
+            (&historical, vec![balance_record(&historical, 3, 4000)]),
+        ] {
+            Mock::given(path("/v1/indexer/vtxos")).and(query_param("scripts", script))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "vtxos": records, "page": {"next": 0, "total": 0}
+                }))).expect(1).mount(&mock).await;
+        }
+        let (_client, stream) = UnixStream::pair().unwrap();
+        let deadline = coordinator.state.lock().unwrap().deadline();
+        assert_eq!(balance(&stream, &agent, &coordinator).await.unwrap(), crate::wallet::balance::Balance {
+            offchain_balance_sats: 10000, confirmed_sats: 1000, preconfirmed_sats: 2000,
+            recoverable_sats: 3000, pending_recovery_sats: 4000,
+        });
+        assert_eq!(coordinator.state.lock().unwrap().deadline(), deadline);
+        assert_eq!(manager.list().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn balance_requires_session_and_reloads_configuration_without_exposing_details() {
+        let (home, agent, coordinator) = receive_fixture();
+        let (_client, stream) = UnixStream::pair().unwrap();
+        let config = home.path().join(".akcli/config.toml");
+        for (contents, tag) in [("", 14), ("operator=42", 15), ("operator='http://private-marker@localhost'", 15)] {
+            fs::write(&config, contents).unwrap();
+            assert_eq!(protocol::balance_response(balance(&stream, &agent, &coordinator).await), [1, tag]);
+        }
+        coordinator.state.lock().unwrap().lock(false);
+        assert_eq!(protocol::balance_response(balance(&stream, &agent, &coordinator).await), [1, 13]);
+        assert!(!home.path().join(".akcli/wallets/alice/metadata.json").exists());
+    }
+
+    #[test]
+    fn every_balance_domain_error_maps_to_a_static_typed_frame() {
+        use crate::wallet::balance::BalanceError::*;
+        for (error, tag) in [
+            (MissingState, 16), (Storage, 17), (Contract, 17), (Operator, 18),
+            (Query, 19), (InvalidVtxo, 20), (DuplicateOutpoint, 20), (Overflow, 20), (Clock, 21),
+        ] {
+            let bytes = protocol::balance_response(Err(balance_error(error)));
+            assert_eq!(bytes, [1, tag]);
+            assert!(protocol::parse_balance_response(&bytes).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn balance_later_page_is_dropped_on_session_changes_disconnect_and_budget() {
+        use wiremock::{matchers::{path, query_param}, Mock, ResponseTemplate};
+        for mode in ["lock", "stop", "replace", "disconnect", "expiry", "budget"] {
+            let (_home, agent, coordinator, mock, script) = balance_fixture().await;
+            let coordinator = if mode == "expiry" {
+                let coordinator = Arc::new(Coordinator::new(Duration::from_secs(5)));
+                install(&coordinator);
+                coordinator
+            } else { coordinator };
+            Mock::given(path("/v1/indexer/vtxos")).and(query_param("page.index", "0"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "vtxos": [balance_record(&script, 0, 1000)], "page": {"next": 7, "total": 9}
+                }))).expect(1).mount(&mock).await;
+            let started = Arc::new(Notify::new());
+            let signal = started.clone();
+            Mock::given(path("/v1/indexer/vtxos")).and(query_param("page.index", "7"))
+                .respond_with(move |_: &wiremock::Request| {
+                    signal.notify_one();
+                    ResponseTemplate::new(200).set_delay(Duration::from_secs(60))
+                        .set_body_json(serde_json::json!({"vtxos": [], "page": {"next": 9, "total": 9}}))
+                }).expect(1).mount(&mock).await;
+            let (client, stream) = UnixStream::pair().unwrap();
+            let shared = coordinator.clone();
+            let request_agent = agent.clone();
+            let request = tokio::spawn(async move {
+                timeout(Duration::from_secs(25), balance(&stream, &request_agent, &shared))
+                    .await.map_err(|_| Error::Timeout)?
+            });
+            timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+            // Exercise authenticated control handling, not merely mutex access.
+            let (mut control, server) = UnixStream::pair().unwrap();
+            protocol::write(&mut control, &[1, 1]).await.unwrap();
+            timeout(Duration::from_secs(1), handle(server, agent.clone(), coordinator.clone()))
+                .await.unwrap().unwrap();
+            assert_eq!(protocol::parse_response(&protocol::read(&mut control).await.unwrap()).unwrap(), Status::Unlocked(name()));
+            let deadline = coordinator.state.lock().unwrap().deadline();
+            let (_unlock_client, mut unlock_stream) = UnixStream::pair().unwrap();
+            assert!(unlock(&mut unlock_stream, &coordinator, name(), || Err(Error::Unlock)).await.is_err());
+            assert_eq!(coordinator.state.lock().unwrap().deadline(), deadline);
+            assert!(!request.is_finished(), "failed unlock must preserve in-flight balance");
+            match mode {
+                "lock" | "stop" => {
+                    let (mut control, server) = UnixStream::pair().unwrap();
+                    protocol::write(&mut control, &[1, if mode == "lock" { 3 } else { 4 }]).await.unwrap();
+                    timeout(Duration::from_secs(1), handle(server, agent, coordinator.clone())).await.unwrap().unwrap();
+                    assert_eq!(protocol::parse_response(&protocol::read(&mut control).await.unwrap()).unwrap(), Status::Locked);
+                }
+                "replace" => {
+                    unlock(&mut unlock_stream, &coordinator, name(), || Ok(secret())).await.unwrap();
+                }
+                "disconnect" => drop(client),
+                "expiry" | "budget" => {
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(if mode == "expiry" { 5 } else { 25 })).await;
+                }
+                _ => unreachable!(),
+            }
+            let result = timeout(Duration::from_secs(1), request).await.unwrap().unwrap();
+            match mode {
+                "disconnect" => assert!(matches!(result, Err(Error::Protocol))),
+                "budget" => assert!(matches!(result, Err(Error::Timeout))),
+                _ => assert!(matches!(result, Err(Error::BalanceSession)), "{mode}: {result:?}"),
+            }
+            assert!(coordinator.receive.try_lock().is_ok(), "cancelled work must release SQLite serialization");
+            if matches!(mode, "expiry" | "budget") { tokio::time::resume(); }
+        }
     }
 
     fn name() -> WalletName {
