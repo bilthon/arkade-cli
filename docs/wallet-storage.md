@@ -1,9 +1,9 @@
 # Wallet storage
 
 The encrypted mnemonic store backs the [local wallet CLI](wallet-cli.md) and agent.
-The private agent receive operation (R2) derives an address and persists its public
-contract through the pinned SDK. There is no public receive CLI yet (R3), and no
-balance, send, sync, swap, or restore support.
+`wallet receive` derives an address and persists its public contract through the
+pinned SDK. `wallet balance` reports operator-reported offchain holdings across
+saved default receive contracts. There is no send, sync, swap, or restore support.
 An encrypted mnemonic backup is **not a guarantee of complete wallet recovery**:
 contract, key-index, and swap state may also be required by future integrations.
 
@@ -139,6 +139,24 @@ auxiliary rejection, failed inserts, and no-write operator/binding mismatches,
 in addition to R1's bounded parsing, partial retries, no-clobber races, unsafe
 files/directories, and descriptor retention across a directory rename.
 Power-loss durability, cross-UID fixtures, and physical erasure remain unproven.
+
+## Balance storage
+
+Balance requires the existing metadata-v2 environment/operator/profile binding
+and initialized receive state. Missing or partial state fails rather than returning
+zero or implicitly calling receive. Valid initialized state with no matching VTXOs
+returns zero. All persisted default contracts are validated, including inactive and
+historical signer/policy variants; unsupported contracts are not silently skipped.
+Unique stored P2TR scripts are queried without deriving addresses or inserting
+contracts. This is not discovery or a complete recovery scan.
+
+The accepted pinned SDK `SqliteContractStore` opening may create parent directories,
+open SQLite read-write/create, and execute `CREATE TABLE IF NOT EXISTS`. Balance
+therefore does not promise strict read-only storage or byte immutability, even
+though it does not insert contracts or move funds. Existing storage safety checks
+and metadata binding remain in force, including checks around SDK opening and
+auxiliary files. SQLite calls are synchronous and not instantly cancelable.
+See [classification and output limits](wallet-cli.md#read-offchain-balance).
 
 ## Secret handling is best effort
 

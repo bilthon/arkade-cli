@@ -2,9 +2,9 @@
 
 `akcli wallet` stores named encrypted English BIP39 mnemonics and keeps at most
 one unlocked mnemonic in a private local agent. `wallet receive` asks that agent
-to derive and persist a receive address through the pinned SDK. Only receive
-contacts the configured REST operator. No balance, send, on-chain wallet, sync,
-or complete recovery operation is provided.
+to derive and persist a receive address through the pinned SDK. Receive and balance
+contact the configured REST operator. Balance reports offchain holdings; no send,
+on-chain wallet, sync, or complete recovery operation is provided.
 
 ## Commands
 
@@ -16,6 +16,7 @@ or complete recovery operation is provided.
 | `akcli wallet unlock <name>` | Prompt for a password, start the agent if absent, and replace its retained wallet on success |
 | `akcli wallet status` | Show running/stopped and locked/unlocked status, plus the public unlocked name |
 | `akcli wallet receive` | Show a receive address for the currently unlocked wallet; reuse index 0, not rotation |
+| `akcli wallet balance` | Report offchain holdings across all saved default receive contracts |
 | `akcli wallet lock` | Forget the agent's retained mnemonic, without stopping the agent |
 | `akcli wallet agent stop` | Stop the agent and forget retained material |
 
@@ -30,7 +31,7 @@ placeholders; receive initializes public state only after validation.
 Create/import/unlock require `/dev/tty`; piped stdin is not a secret-input
 interface. Name and terminal validation precede secret entry and publication or
 agent startup. Global flags work before or after subcommands. Wallet commands
-ignore `--color` and the explorer HTTP `--timeout` setting. Receive rejects
+ignore `--color` and the explorer HTTP `--timeout` setting. Receive and balance reject
 `--operator`: set the persistent top-level `operator` instead. Other wallet commands
 continue to ignore `--operator`.
 `--json` affects only the public result, not interactive terminal prompts.
@@ -77,7 +78,7 @@ redisplayed. Import does not unlock or launch the agent.
 
 Unlock prompts only for the file password. Successful unlock replaces the one
 previously retained wallet. A wrong password or failed unlock preserves the
-previous state without extending its expiry. Status, list, and receive never renew
+previous state without extending its expiry. Status, list, receive, and balance never renew
 expiry. Explicit lock and stop apply globally, not to a named wallet.
 
 Status on a proven absent agent returns stopped/locked. Lock and stop then succeed
@@ -96,7 +97,7 @@ idle_timeout_seconds = 600
 ```
 
 The value must be an integer from 1 to 86400; the default is 600 seconds. Unrelated
-operator fields are ignored by this loader. Receive separately loads its own
+operator fields are ignored by this loader. Receive and balance separately load
 settings in the daemon; other wallet commands do not load configuration, so a
 malformed explorer configuration does not prevent locking.
 Invalid wallet settings fail unlock with a sanitized diagnostic.
@@ -161,6 +162,67 @@ holds SDK contract state. The contract is persisted before an address is returne
 Version-1 bindings, changed URLs/environments, and malformed or unsafe storage
 are rejected without migration or rewriting. Do not treat the mnemonic alone as a full recovery backup. See
 [receive storage](wallet-storage.md#receive-storage-preparation-r1).
+
+## Read offchain balance
+
+After configuring the top-level REST `operator`, unlocking, and initializing receive
+state with `akcli wallet receive`, run:
+
+```sh
+akcli wallet balance
+akcli wallet balance --json
+```
+
+Balance is parameterless: no wallet name, operator override, amount, password,
+or unlock/sync option. It uses the current unlocked session without prompting,
+autostarting, unlocking or renewing the lease. If an older daemon is running after
+an upgrade, run `akcli wallet agent stop`, wait for shutdown, then unlock with the
+current binary. A protocol failure never triggers a hidden restart.
+
+Every saved default receive contract is validated, including inactive contracts
+and historical signer/policy variants. Unique stored scripts are queried through
+the REST indexer; historical addresses are not rederived using the current signer.
+Unsupported contracts and unsafe/incompatible bindings fail closed. Missing or
+partial metadata/database state is an error, not zero; use receive to initialize
+it explicitly. A valid initialized store with no matching VTXOs returns zero.
+The existing SDK SQLite opening is initialization-capable (read-write/create and
+`CREATE TABLE IF NOT EXISTS`), so this is **not strict read-only local storage**.
+Balance inserts no contracts, derives no addresses, discovers no missing history,
+syncs nothing, and performs no send, renewal or recovery.
+
+Human output is plain sats:
+
+```text
+Offchain balance (operator-reported): 100 sats
+Confirmed: 10 sats
+Preconfirmed: 20 sats
+Recoverable: 30 sats
+Pending recovery: 40 sats
+Warning: Reported holdings can include funds unavailable for immediate spending.
+```
+
+JSON has exactly five keys, each a decimal **string**, including zero and values
+above JavaScript's safe integer range. There is no warning field:
+
+```json
+{"offchain_balance_sats":"100","confirmed_sats":"10","preconfirmed_sats":"20","recoverable_sats":"30","pending_recovery_sats":"40"}
+```
+
+These are pinned-SDK, operator-reported offchain classifications, not Bitcoin
+confirmations, proof of funds, or a spendable balance. Recoverable does not
+promise successful or complete recovery. Classification samples current operator
+info (including deprecated signers) and local time; inaccurate system time can
+affect expiry. Remote pagination is not an atomic snapshot. Onchain funds, assets,
+and undiscovered contracts are outside this report. No live verification is claimed.
+
+Failures exit 1 with a static diagnostic on stderr and **empty stdout** in both
+modes. Missing agent/session calls for unlock; missing/invalid configuration calls
+for a valid top-level REST operator; missing receive state calls for receive.
+Storage/contract errors require checking the wallet/operator association. Operator
+info/connectivity and VTXO query errors require checking service compatibility and
+availability. Invalid/duplicate/overflowing responses fail without partial totals;
+clock errors call for checking system time. No URL, backend body, secret, or raw
+storage/config content is printed. Clap parse diagnostics remain standard (exit 2).
 
 ## Output and cancellation
 

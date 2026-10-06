@@ -4,9 +4,10 @@ The local agent retains **one** unlocked mnemonic in memory. Its private receive
 operation derives a fixed-index address through the pinned SDK and persists the
 public contract before responding. It does not sign, sync, or return mnemonic
 material. `akcli wallet receive` exposes this operation for the currently unlocked
-wallet. Interactive wallet commands and shared REST operator configuration are
-described in [wallet-cli.md](wallet-cli.md). Other wallet commands do not require
-operator configuration.
+wallet. `akcli wallet balance` reports saved-contract offchain holdings through
+the same authenticated transport. Interactive commands and shared REST operator
+configuration are described in [wallet-cli.md](wallet-cli.md). Commands other than
+receive and balance do not require operator configuration.
 
 ## Interface and lease
 
@@ -15,7 +16,7 @@ there is no HOME, explorer-config, or operator lookup. `Options::default()` uses
 600 seconds. `Options::new(Duration)` accepts whole seconds from 1 through 86,400.
 
 The async interface is `ensure_running`, `unlock(&WalletName, Secret)`, `status`,
-`receive`, `lock`, and `stop`. `receive()` returns only a validated SDK address,
+`receive`, `balance`, `lock`, and `stop`. `receive()` returns only a validated SDK address,
 never status or mnemonic data; it does not start or unlock an agent.
 Call `ensure_running` before unlocking. It launches the current
 executable, which must dispatch `agent::internal_entry()` before normal startup.
@@ -35,7 +36,7 @@ monotonic deadline. A failed unlock preserves the previous wallet **without
 renewing its deadline**. Status does not renew it either. An independent active
 maintenance future drops retained material at expiry, even without client calls
 and while a blocking KDF runs. Lock and stop are global. Restart always begins
-locked. Receive never renews the deadline.
+locked. Receive and balance never renew the deadline.
 
 ## Process and filesystem lifecycle
 
@@ -90,7 +91,7 @@ checks before reading a request. Same-UID processes are within the trust domain;
 this is not authentication against malware running as the wallet owner.
 
 The private v1 protocol uses a four-byte big-endian payload length, then version
-and opcode bytes. Status/lock/stop/receive have no further payload. Unlock carries a
+and opcode bytes. Status/lock/stop/receive/balance have no further payload. Unlock carries a
 one-byte name length, validated ASCII name, two-byte password length, and UTF-8
 password. Maximum payload size is 4133 bytes. Frames are allocated at their exact
 validated size under `Zeroizing<Vec<u8>>` before receiving secret bytes and never
@@ -168,6 +169,38 @@ IPC, index-0 persistence/reopen reuse, a pinned-SDK golden address with independ
 BIP32 path verification, mismatches before writes, failed inserts, actual SQLite
 WAL/SHM permissions, serialization, unchanged leases, and deterministic pending
 request cancellation on every session transition, timeout, and caller drop.
+
+## Balance lifecycle
+
+`Agent::balance()` uses the existing authenticated, non-creating transport and
+strict balance response decoder. Opcode 6 requests balance; success tag 12 carries
+exactly five big-endian u64 values (42 payload bytes including version/tag): total,
+confirmed, preconfirmed, recoverable, pending recovery. Static two-byte error tags
+13–21 identify session, missing operator, invalid config, missing receive state,
+storage/contract, operator info/connectivity, query, invalid/duplicate/overflow
+response, and clock errors. Other tags, versions, lengths, or trailing payloads
+are rejected. Status/receive encodings and authentication are unchanged.
+
+The daemon reloads persisted top-level REST `operator` per request. There is no
+wire URL override; the CLI rejects `--operator`. Balance requires an unlocked
+session and initialized receive metadata/database binding, enumerates all saved
+default contracts (including historical/inactive variants), and queries unique
+stored scripts with existing paginated REST behavior. It never derives addresses,
+inserts contracts, discovers history, syncs, or moves funds. The SDK SQLite open
+is initialization-capable, not strict read-only storage. Current operator info
+and local time drive SDK classification; pagination is not atomic and holdings
+are not proof of funds, immediate spendability or guaranteed recovery.
+
+Balance shares receive serialization, request budgets and session cancellation.
+Lock, stop, replacement, expiry, disconnect and budget expiration invalidate
+in-flight results without renewing the lease. Failed unlock preserves the session.
+No secret-bearing provider crosses network waits; synchronous SQLite work cannot
+be instantly canceled. The final session check is not atomic with subsequent
+socket delivery. An old daemon must be manually stopped and re-unlocked with the
+upgraded binary; unknown-opcode/protocol failures never autostart or restart it.
+Synthetic local REST and IPC tests cover historical defaults, output/errors,
+non-creating absence, malformed frames, and lifecycle cancellation; they do not
+claim live operator verification.
 
 ## Security limits and verification
 

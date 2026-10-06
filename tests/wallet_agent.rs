@@ -50,13 +50,16 @@ impl Fixture {
         assert!(output.status.success(), "{output:?}");
     }
     async fn cli_receive(&self, json: bool) -> std::process::Output {
+        self.cli_wallet("receive", json).await
+    }
+    async fn cli_wallet(&self, operation: &'static str, json: bool) -> std::process::Output {
         let home = self.home.path().to_owned();
         tokio::task::spawn_blocking(move || {
             let mut command = Command::new(env!("CARGO_BIN_EXE_akcli"));
             command
                 .env_clear()
                 .env("HOME", home)
-                .args(["wallet", "receive"])
+                .args(["wallet", operation])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -69,7 +72,7 @@ impl Fixture {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("receive CLI timed out");
+                    panic!("wallet CLI timed out");
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -492,6 +495,62 @@ async fn balance_absent_is_non_creating_and_real_ipc_is_typed_and_fail_closed() 
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(matches!(fixture.agent.balance().await, Err(Error::Absent)));
+}
+
+#[tokio::test]
+async fn balance_cli_reads_historical_defaults_and_preserves_session_and_contracts() {
+    use ark_client::{ContractManager, ContractStore, SqliteContractStore};
+    use ark_core::contract::{ContractState, DefaultVtxoContract};
+    use wiremock::{matchers::{path, query_param}, Mock, ResponseTemplate};
+    let fixture = Fixture::new(60);
+    let locked = fixture.cli_wallet("balance", true).await;
+    assert_eq!(locked.status.code(), Some(1));
+    assert!(locked.stdout.is_empty());
+    assert_eq!(locked.stderr, b"error: wallet session unavailable or changed; unlock and retry balance\n");
+    fixture.create("alice");
+    fixture.unlock("alice").await;
+    let mock = wiremock::MockServer::start().await;
+    std::fs::write(fixture.home.path().join(".akcli/config.toml"),
+        format!("operator='{}'", mock.uri())).unwrap();
+    Mock::given(path("/v1/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(info_body("regtest")))
+        .mount(&mock).await;
+    fixture.agent.receive().await.unwrap();
+    let database = fixture.home.path().join(".akcli/wallets/alice/contracts.db");
+    let store = SqliteContractStore::new(&database).unwrap();
+    let mut manager = ContractManager::new_with_builtins(bitcoin::Network::Regtest,
+        Box::new(SqliteContractStore::new(&database).unwrap())).unwrap();
+    let key = |byte| bitcoin::secp256k1::SecretKey::from_slice(&[byte; 32]).unwrap()
+        .public_key(&bitcoin::secp256k1::Secp256k1::new()).x_only_public_key().0;
+    manager.insert_or_get(DefaultVtxoContract {
+        server: key(3), owner: key(1), exit_delay: bitcoin::Sequence::from_height(288),
+    }, ContractState::Inactive, Some(0)).unwrap();
+    let before = store.list().unwrap();
+    assert_eq!(before.len(), 2);
+    for (index, contract) in before.iter().enumerate() {
+        let script = contract.script_pubkey.to_hex_string();
+        Mock::given(path("/v1/indexer/vtxos"))
+            .and(query_param("scripts", &script))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "vtxos": [{"outpoint": {"txid": "11".repeat(32), "vout": index},
+                    "script": script, "amount": "1000", "createdAt": "1", "expiresAt": "4102444800"}],
+                "page": {"next": 0, "total": 0}
+            }))).mount(&mock).await;
+    }
+    let output = fixture.cli_wallet("balance", true).await;
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["offchain_balance_sats"], "2000");
+    assert_eq!(value.as_object().unwrap().len(), 5);
+    assert!(value.as_object().unwrap().values().all(|value| value.is_string()));
+    assert_eq!(store.list().unwrap(), before);
+    assert_eq!(fixture.agent.status().await.unwrap(), Status::Unlocked(WalletName::new("alice").unwrap()));
+    fixture.agent.lock().await.unwrap();
+    let output = fixture.cli_wallet("balance", false).await;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(fixture.agent.status().await.unwrap(), Status::Locked);
 }
 
 #[test]

@@ -30,6 +30,8 @@ pub enum Command {
     Status,
     /// Show a receive address for the currently unlocked wallet (reuses index 0).
     Receive,
+    /// Show operator-reported offchain holdings for the currently unlocked wallet.
+    Balance,
     /// Forget the agent's retained mnemonic.
     Lock,
     /// Manage the local wallet agent.
@@ -226,6 +228,34 @@ pub async fn run(command: &Command, json: bool) -> anyhow::Result<()> {
                 println!("{}", serde_json::json!({ "address": address }));
             } else {
                 println!("Address: {address}");
+            }
+            return Ok(());
+        }
+        Command::Balance => {
+            let balance = agent.balance().await.map_err(|error| match error {
+                Error::Absent => anyhow::anyhow!(
+                    "wallet agent is not running; run `akcli wallet unlock <name>` before reading balance"
+                ),
+                Error::Protocol | Error::Timeout => anyhow::anyhow!(
+                    "{error}; an older agent may not support balance. Run `akcli wallet agent stop`, then unlock again and retry"
+                ),
+                _ => error.into(),
+            })?;
+            if json {
+                println!("{}", serde_json::json!({
+                    "offchain_balance_sats": balance.offchain_balance_sats.to_string(),
+                    "confirmed_sats": balance.confirmed_sats.to_string(),
+                    "preconfirmed_sats": balance.preconfirmed_sats.to_string(),
+                    "recoverable_sats": balance.recoverable_sats.to_string(),
+                    "pending_recovery_sats": balance.pending_recovery_sats.to_string(),
+                }));
+            } else {
+                println!(
+                    "Offchain balance (operator-reported): {} sats\nConfirmed: {} sats\nPreconfirmed: {} sats\nRecoverable: {} sats\nPending recovery: {} sats\nWarning: Reported holdings can include funds unavailable for immediate spending.",
+                    balance.offchain_balance_sats, balance.confirmed_sats,
+                    balance.preconfirmed_sats, balance.recoverable_sats,
+                    balance.pending_recovery_sats,
+                );
             }
             return Ok(());
         }

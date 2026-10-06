@@ -266,6 +266,151 @@ fn receive_rejects_incompatible_and_malformed_agent_responses_without_restarting
 }
 
 #[test]
+fn balance_is_parameterless_and_non_creating() {
+    let home = tempfile::tempdir().unwrap();
+    let help = cli(home.path(), &["wallet", "balance", "--help"]);
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: akcli wallet balance"));
+    for args in [vec!["wallet", "balance"], vec!["--json", "wallet", "balance"]] {
+        let output = cli(home.path(), &args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"error: wallet agent is not running; run `akcli wallet unlock <name>` before reading balance\n");
+    }
+    for extra in ["alice", "--amount", "--sync", "--unlock", "--password"] {
+        let output = cli(home.path(), &["wallet", "balance", extra]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+    }
+    for args in [
+        vec!["--operator", "http://private-marker.invalid", "wallet", "balance"],
+        vec!["wallet", "balance", "--operator", "http://private-marker.invalid"],
+    ] {
+        let output = cli(home.path(), &args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"error: wallet balance does not accept --operator; set operator in .akcli/config.toml\n");
+    }
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+fn balance_response(response: Vec<u8>, json: bool) -> Output {
+    use std::{
+        io::{Read, Write},
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+        time::{Duration, Instant},
+    };
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let run = home.path().join(".akcli/run");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let lock = run.join("agent.lock");
+    std::fs::write(&lock, []).unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let socket = run.join("agent.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "client did not connect");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut request = [0; 6];
+        stream.read_exact(&mut request).unwrap();
+        assert_eq!(request, [0, 0, 0, 2, 1, 6]);
+        if !response.is_empty() {
+            stream.write_all(&(response.len() as u32).to_be_bytes()).unwrap();
+            stream.write_all(&response).unwrap();
+        }
+    });
+    let args = if json { vec!["--json", "wallet", "balance"] } else { vec!["wallet", "balance"] };
+    let output = cli(home.path(), &args);
+    server.join().unwrap();
+    assert!(socket.exists(), "must not restart or clean up the listener");
+    assert_eq!(std::fs::read_dir(&run).unwrap().count(), 2);
+    assert_eq!(std::fs::read_dir(home.path().join(".akcli")).unwrap().count(), 1);
+    output
+}
+
+#[cfg(unix)]
+#[test]
+fn balance_renders_exact_human_and_decimal_string_json() {
+    let mut frame = vec![1, 12];
+    for value in [100u64, 10, 20, 30, 40] {
+        frame.extend(value.to_be_bytes());
+    }
+    let output = balance_response(frame.clone(), false);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(output.stdout, b"Offchain balance (operator-reported): 100 sats\nConfirmed: 10 sats\nPreconfirmed: 20 sats\nRecoverable: 30 sats\nPending recovery: 40 sats\nWarning: Reported holdings can include funds unavailable for immediate spending.\n");
+    let output = balance_response(frame, true);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), serde_json::json!({
+        "offchain_balance_sats": "100", "confirmed_sats": "10", "preconfirmed_sats": "20",
+        "recoverable_sats": "30", "pending_recovery_sats": "40"
+    }));
+    let mut maximum = vec![1, 12];
+    for value in [u64::MAX, u64::MAX, 0, 0, 0] {
+        maximum.extend(value.to_be_bytes());
+    }
+    let output = balance_response(maximum, true);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["offchain_balance_sats"], "18446744073709551615");
+}
+
+#[cfg(unix)]
+#[test]
+fn balance_static_errors_are_actionable_and_never_print_totals() {
+    for (tag, message) in [
+        (13, "wallet session unavailable or changed; unlock and retry balance"),
+        (14, "set the configured REST operator before reading balance"),
+        (15, "invalid balance configuration; use an HTTP(S) operator without credentials, query or fragment"),
+        (16, "receive state is missing or incomplete; initialize with wallet receive"),
+        (17, "unsafe or incompatible balance storage or contract; check wallet and operator association"),
+        (18, "cannot obtain valid operator information; check configuration, connectivity and compatibility"),
+        (19, "balance query failed; check operator availability and compatibility, then retry"),
+        (20, "invalid, duplicate or overflowing balance response; check operator compatibility"),
+        (21, "cannot classify balance with the local clock; check system time"),
+    ] {
+        for json in [false, true] {
+            let output = balance_response(vec![1, tag], json);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("error: {message}\n"));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn balance_old_unknown_and_malformed_responses_never_restart() {
+    let mut oversized = vec![1, 12];
+    oversized.extend([0; 41]);
+    for frame in [vec![], vec![1, 0], vec![1, 255], vec![2, 12], vec![1, 12],
+        b"\x01\x14private-backend-marker".to_vec(), oversized] {
+        for json in [false, true] {
+            let output = balance_response(frame.clone(), json);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            assert_eq!(output.stderr, b"error: agent protocol or authentication failure; an older agent may not support balance. Run `akcli wallet agent stop`, then unlock again and retry\n");
+        }
+    }
+}
+
+#[test]
 fn absent_status_is_public_and_does_not_create_runtime() {
     let home = tempfile::tempdir().unwrap();
     let output = cli(home.path(), &["wallet", "status", "--json"]);

@@ -5,8 +5,8 @@ of the exploratory convenience of `bitcoin-cli`, but for Arkade VTXOs.
 
 Explorer commands are **read-only**. Local `wallet` commands additionally store
 encrypted BIP39 mnemonics and manage a private, on-demand memory agent. Receive
-addresses are available through the pinned SDK; balance, send, on-chain wallet,
-sync, and complete recovery are not implemented.
+addresses and operator-reported offchain balance are available through the pinned
+SDK; send, on-chain wallet, sync, and complete recovery are not implemented.
 
 ## Install
 
@@ -53,6 +53,7 @@ akcli wallet list
 akcli wallet unlock personal
 akcli wallet status
 akcli wallet receive                    # requires receive configuration below
+akcli wallet balance                    # unlocked session, initialized receive state
 akcli wallet lock
 akcli wallet agent stop
 ```
@@ -64,9 +65,9 @@ only). It saves the encrypted file **before** explicitly displaying the new
 phrase on the terminal. Cancelling after publication retains that file,
 even without backup acknowledgement. No command exports a stored phrase.
 
-Wallet commands require an absolute `HOME`. Receive uses the existing top-level
-REST `operator` configuration; other wallet commands do not require it. `--json` contains only public names/results/status or a
-receive address; it never contains passwords or phrases.
+Wallet commands require an absolute `HOME`. Receive and balance use the existing
+top-level REST `operator` configuration; other wallet commands do not require it.
+`--json` contains only public results, never passwords or phrases.
 The file password is **not** a BIP39 passphrase, and a mnemonic alone is not a
 guaranteed complete recovery backup. See [wallet usage and limits](docs/wallet-cli.md).
 
@@ -100,6 +101,32 @@ reuses SDK owner index 0 across requests/restarts. An operator signer/policy cha
 can change the address; this is not rotation. Public `contracts.db` and
 `metadata.json` are persisted beside the encrypted wallet with owner-only
 permissions; they are not encrypted. A mnemonic alone is not a full recovery backup.
+
+### Offchain balance
+
+`akcli wallet balance` takes no parameters and requires a currently unlocked agent.
+It queries all persisted default receive contracts, including historical signer and
+policy variants, without deriving addresses, inserting contracts, discovering funds,
+syncing, or moving funds. Missing/partial receive state is an error: initialize it
+explicitly with `wallet receive`; a valid initialized store with no matching VTXOs
+reports zero. Balance rejects `--operator`; the daemon reloads the persisted
+REST configuration per request. After upgrading an old daemon binary, stop it and
+unlock again; balance never autostarts or restarts it or renews its lease.
+
+The headline is `Offchain balance (operator-reported)`, with Confirmed,
+Preconfirmed, Recoverable and Pending recovery buckets in sats and an availability
+warning. These SDK classifications are not Bitcoin confirmations, proof of funds,
+immediate spendability, or guaranteed/complete recovery. No onchain/assets are
+included. Pagination is not an atomic snapshot; expiry depends on the local clock.
+SQLite opening is initialization-capable, not strictly read-only storage.
+`--json` returns exactly five decimal-string values:
+
+```json
+{"offchain_balance_sats":"100","confirmed_sats":"10","preconfirmed_sats":"20","recoverable_sats":"30","pending_recovery_sats":"40"}
+```
+
+Failures print a sanitized diagnostic to stderr, with no partial totals on stdout.
+See [balance details](docs/wallet-cli.md#read-offchain-balance).
 
 ## Usage
 
@@ -260,7 +287,7 @@ one VTXO (`vtxo`), one commitment transaction (`tx`), and virtual transaction
 PSBT inspection (`virtual-tx`), and script inspection (`script`). Ancestry tracing
 is not implemented yet. Encrypted named mnemonic storage and interactive local
 wallet-agent commands and receive addresses are also available on macOS/Linux;
-they do not yet provide balance, spending, or complete recovery.
+they provide operator-reported offchain balance, but not spending or complete recovery.
 
 Built on the official [Arkade Rust SDK](https://github.com/arkade-os/rust-sdk)
 (`ark-rest` and `ark-core`, pinned to the same revision).

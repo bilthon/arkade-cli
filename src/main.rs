@@ -102,10 +102,17 @@ fn configured_operator(cli: &Cli) -> anyhow::Result<String> {
 
 async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Wallet { command } = &cli.command {
-        anyhow::ensure!(
-            !matches!(command, wallet_cli::Command::Receive) || cli.operator.is_none(),
-            "wallet receive does not accept --operator; set operator in .akcli/config.toml"
-        );
+        let persisted_operator_command = match command {
+            wallet_cli::Command::Receive => Some("receive"),
+            wallet_cli::Command::Balance => Some("balance"),
+            _ => None,
+        };
+        if let Some(name) = persisted_operator_command {
+            anyhow::ensure!(
+                cli.operator.is_none(),
+                "wallet {name} does not accept --operator; set operator in .akcli/config.toml"
+            );
+        }
         wallet_cli::run(command, cli.json).await?;
         return Ok(ExitCode::SUCCESS);
     }
