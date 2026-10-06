@@ -294,6 +294,14 @@ pub(super) async fn call(
     op: u8,
     unlock: Option<(&crate::wallet::WalletName, &crate::wallet::Secret)>,
 ) -> Result<Status, Error> {
+    protocol::parse_response(&call_frame(agent, op, unlock).await?)
+}
+
+pub(super) async fn call_frame(
+    agent: &Agent,
+    op: u8,
+    unlock: Option<(&crate::wallet::WalletName, &crate::wallet::Secret)>,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, Error> {
     let runtime = Runtime::open_mode(agent, false)?;
     timeout(Duration::from_secs(30), async {
         let mut stream = runtime.connect().await?.ok_or(Error::Absent)?;
@@ -301,7 +309,7 @@ pub(super) async fn call(
         let bytes = protocol::request(op, unlock)?;
         protocol::write(&mut stream, &bytes).await?;
         drop(bytes);
-        protocol::parse_response(&protocol::read(&mut stream).await?)
+        protocol::read(&mut stream).await
     })
     .await
     .map_err(|_| Error::Timeout)?

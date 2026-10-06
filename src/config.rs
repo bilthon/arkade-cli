@@ -127,19 +127,41 @@ pub fn load_wallet_settings(home: &Path) -> Result<WalletSettings, WalletConfigE
     }
 }
 
-/// Validated receive binding, independent of the explorer and idle-timeout settings.
+/// Binding derived from one validated operator response, never from TOML.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiveSettings {
     environment: String,
-    grpc_endpoint: String,
+    operator_rest_url: String,
 }
 
 impl ReceiveSettings {
     pub fn new(environment: &str, endpoint: &str) -> Result<Self, WalletConfigError> {
-        if !matches!(
-            environment,
-            "bitcoin" | "testnet" | "testnet4" | "signet" | "regtest" | "mutinynet"
-        ) || endpoint.len() > 2048
+        environment
+            .parse::<ark_core::server::Network>()
+            .map_err(|_| WalletConfigError)?;
+        let operator_rest_url = ReceiveOperator::new(endpoint)?.0;
+        Ok(Self {
+            environment: environment.to_owned(),
+            operator_rest_url,
+        })
+    }
+    pub fn environment(&self) -> &str {
+        &self.environment
+    }
+    pub fn operator_rest_url(&self) -> &str {
+        &self.operator_rest_url
+    }
+}
+
+/// URL-only receive configuration; the operator establishes the first network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiveOperator(String);
+impl ReceiveOperator {
+    pub fn url(&self) -> &str {
+        &self.0
+    }
+    pub fn new(endpoint: &str) -> Result<Self, WalletConfigError> {
+        if endpoint.len() > 2048
             || endpoint
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control())
@@ -164,58 +186,46 @@ impl ReceiveSettings {
         {
             return Err(WalletConfigError);
         }
-        Ok(Self {
-            environment: environment.to_owned(),
-            grpc_endpoint: url.as_str().trim_end_matches('/').to_owned(),
-        })
-    }
-
-    pub fn environment(&self) -> &str {
-        &self.environment
-    }
-    pub fn grpc_endpoint(&self) -> &str {
-        &self.grpc_endpoint
+        Ok(Self(url.as_str().trim_end_matches('/').to_owned()))
     }
 }
 
 const RECEIVE_CONFIG_LIMIT: usize = 64 * 1024;
 
-pub fn parse_receive_settings(contents: &str) -> Result<ReceiveSettings, WalletConfigError> {
+#[derive(Debug, thiserror::Error)]
+pub enum ReceiveConfigError {
+    #[error("set operator in .akcli/config.toml to receive")]
+    MissingOperator,
+    #[error("invalid receive configuration; set operator to an HTTP(S) base URL without credentials, query or fragment")]
+    Invalid,
+}
+
+pub fn parse_receive_settings(contents: &str) -> Result<ReceiveOperator, ReceiveConfigError> {
     if contents.len() > RECEIVE_CONFIG_LIMIT {
-        return Err(WalletConfigError);
+        return Err(ReceiveConfigError::Invalid);
     }
-    #[derive(Deserialize)]
-    struct Root {
-        wallet: Wallet,
-    }
-    #[derive(Deserialize)]
-    struct Wallet {
-        receive: Receive,
-    }
-    #[derive(Deserialize)]
-    struct Receive {
-        environment: String,
-        grpc_endpoint: String,
-    }
-    let receive = toml::from_str::<Root>(contents)
-        .map_err(|_| WalletConfigError)?
-        .wallet
-        .receive;
-    ReceiveSettings::new(&receive.environment, &receive.grpc_endpoint)
+    let config: Config = toml::from_str(contents).map_err(|_| ReceiveConfigError::Invalid)?;
+    let operator = config.operator.ok_or(ReceiveConfigError::MissingOperator)?;
+    ReceiveOperator::new(&operator).map_err(|_| ReceiveConfigError::Invalid)
 }
 
 /// Receive requests must reload using the daemon's absolute home, not explorer defaults.
-pub fn load_receive_settings(home: &Path) -> Result<ReceiveSettings, WalletConfigError> {
+pub fn load_receive_settings(home: &Path) -> Result<ReceiveOperator, ReceiveConfigError> {
     if !home.is_absolute() {
-        return Err(WalletConfigError);
+        return Err(ReceiveConfigError::Invalid);
     }
     use std::io::Read;
     let mut text = String::new();
-    std::fs::File::open(home.join(".akcli/config.toml"))
-        .map_err(|_| WalletConfigError)?
-        .take((RECEIVE_CONFIG_LIMIT + 1) as u64)
+    let file = match std::fs::File::open(home.join(".akcli/config.toml")) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ReceiveConfigError::MissingOperator)
+        }
+        Err(_) => return Err(ReceiveConfigError::Invalid),
+    };
+    file.take((RECEIVE_CONFIG_LIMIT + 1) as u64)
         .read_to_string(&mut text)
-        .map_err(|_| WalletConfigError)?;
+        .map_err(|_| ReceiveConfigError::Invalid)?;
     parse_receive_settings(&text)
 }
 
@@ -271,7 +281,7 @@ mod tests {
             assert_eq!(
                 ReceiveSettings::new("regtest", input)
                     .unwrap()
-                    .grpc_endpoint(),
+                    .operator_rest_url(),
                 expected
             );
         }
@@ -309,11 +319,11 @@ mod tests {
         assert!(load_receive_settings(Path::new("relative")).is_err());
         std::fs::create_dir(home.path().join(".akcli")).unwrap();
         let path = home.path().join(".akcli/config.toml");
-        let text = "operator = 42\n[wallet]\nidle_timeout_seconds = false\n[wallet.receive]\nenvironment = 'regtest'\ngrpc_endpoint = 'http://localhost'";
+        let text = "operator = 'http://localhost'\n[wallet]\nidle_timeout_seconds = false";
         std::fs::write(&path, text).unwrap();
         assert_eq!(
-            load_receive_settings(home.path()).unwrap().environment(),
-            "regtest"
+            load_receive_settings(home.path()).unwrap().url(),
+            "http://localhost"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         let oversized = format!("{text}\n#{}", "x".repeat(64 * 1024));
@@ -335,10 +345,11 @@ mod tests {
             "regtest",
             "mutinynet",
         ] {
-            let text = format!("[wallet.receive]\nenvironment = '{environment}'\ngrpc_endpoint = 'https://localhost:7070/'");
-            let settings = parse_receive_settings(&text).unwrap();
-            assert_eq!(settings.grpc_endpoint(), "https://localhost:7070");
+            let settings = ReceiveSettings::new(environment, "https://localhost:7070/").unwrap();
+            assert_eq!(settings.operator_rest_url(), "https://localhost:7070");
             assert_eq!(settings.environment(), environment);
+            let operator = parse_receive_settings("operator = 'https://localhost:7070/'").unwrap();
+            assert_eq!(operator.url(), settings.operator_rest_url());
         }
         for fields in [
             "environment = 'signet'",

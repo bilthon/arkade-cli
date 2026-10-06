@@ -37,7 +37,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Manage encrypted local wallets (no funds or network operations).
+    /// Manage encrypted local wallets and receive addresses (no spending).
     Wallet {
         #[command(subcommand)]
         command: wallet_cli::Command,
@@ -102,6 +102,10 @@ fn configured_operator(cli: &Cli) -> anyhow::Result<String> {
 
 async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Wallet { command } = &cli.command {
+        anyhow::ensure!(
+            !matches!(command, wallet_cli::Command::Receive) || cli.operator.is_none(),
+            "wallet receive does not accept --operator; set operator in .akcli/config.toml"
+        );
         wallet_cli::run(command, cli.json).await?;
         return Ok(ExitCode::SUCCESS);
     }

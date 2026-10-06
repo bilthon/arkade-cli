@@ -16,21 +16,24 @@ use bitcoin::{
 use std::str::FromStr;
 use zeroize::Zeroizing;
 
-pub(super) async fn operator(endpoint: &str) -> Result<Info, Error> {
-    let mut client = ark_grpc::Client::new(endpoint.to_owned());
-    client.connect().await.map_err(|_| Error::Receive)?;
-    client.get_info().await.map_err(|_| Error::Receive)
-}
-
-pub(super) fn network(settings: &ReceiveSettings) -> Result<Network, Error> {
-    match settings.environment() {
-        "bitcoin" => Ok(Network::Bitcoin),
-        "testnet" => Ok(Network::Testnet),
-        "testnet4" => Ok(Network::Testnet4),
-        "signet" | "mutinynet" => Ok(Network::Signet),
-        "regtest" => Ok(Network::Regtest),
-        _ => Err(Error::Receive),
+pub(super) async fn operator(endpoint: &str) -> Result<(ReceiveSettings, Info), Error> {
+    use crate::indexer::{IndexerClient, IndexerError};
+    let client = IndexerClient::new(endpoint, std::time::Duration::from_secs(10))
+        .map_err(|_| Error::ReceiveConnection)?;
+    let raw = client.get_info().await.map_err(|error| match error {
+        IndexerError::Transport(_) => Error::ReceiveConnection,
+        IndexerError::Response { .. } => Error::ReceiveHttp,
+        IndexerError::Malformed(_) => Error::ReceiveInfo,
+    })?;
+    let environment = raw.network.as_deref().ok_or(Error::ReceiveInfo)?;
+    let network =
+        ark_core::server::Network::from_str(environment).map_err(|_| Error::ReceiveInfo)?;
+    let settings = ReceiveSettings::new(environment, endpoint).map_err(|_| Error::ReceiveInfo)?;
+    let info: Info = raw.try_into().map_err(|_| Error::ReceiveInfo)?;
+    if Network::from(network) != info.network {
+        return Err(Error::ReceiveInfo);
     }
+    Ok((settings, info))
 }
 
 pub(super) fn owner(secret: &Secret, network: Network) -> Result<XOnlyPublicKey, Error> {
@@ -56,14 +59,18 @@ pub(super) fn persist(
     info: &Info,
     owner: XOnlyPublicKey,
 ) -> Result<String, Error> {
-    if network(settings)? != info.network {
-        return Err(Error::Receive);
-    }
-    store.initialize(settings).map_err(|_| Error::Receive)?;
+    store
+        .initialize(settings)
+        .map_err(|_| Error::ReceiveStorage)?;
     // Revalidate all SQLite paths immediately before and after SDK pathname open.
-    store.check_binding(settings).map_err(|_| Error::Receive)?;
-    let sqlite = SqliteContractStore::new(store.database_path()).map_err(|_| Error::Receive)?;
-    store.check_binding(settings).map_err(|_| Error::Receive)?;
+    store
+        .check_binding(settings)
+        .map_err(|_| Error::ReceiveStorage)?;
+    let sqlite =
+        SqliteContractStore::new(store.database_path()).map_err(|_| Error::ReceiveStorage)?;
+    store
+        .check_binding(settings)
+        .map_err(|_| Error::ReceiveStorage)?;
     let mut manager = ContractManager::new_with_builtins(info.network, Box::new(sqlite))
         .map_err(|_| Error::Receive)?;
     let contract = DefaultVtxoContract {
@@ -78,6 +85,8 @@ pub(super) fn persist(
     let vtxo = contract
         .vtxo(&ContractContext::new(info.network))
         .map_err(|_| Error::Receive)?;
-    store.check_binding(settings).map_err(|_| Error::Receive)?;
+    store
+        .check_binding(settings)
+        .map_err(|_| Error::ReceiveStorage)?;
     Ok(vtxo.to_ark_address().to_string())
 }

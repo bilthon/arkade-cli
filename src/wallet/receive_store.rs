@@ -16,7 +16,7 @@ const DATABASE_FILES: [&str; 4] = [
 struct Metadata {
     version: u32,
     environment: String,
-    grpc_endpoint: String,
+    operator_rest_url: String,
     derivation_profile: String,
 }
 
@@ -53,10 +53,10 @@ impl ReceiveStore {
         let metadata = self.directory.read_file("metadata.json")?;
         if let Some(bytes) = &metadata {
             let binding: Metadata = serde_json::from_slice(bytes).map_err(|_| Error::Storage)?;
-            if binding.version != 1
+            if binding.version != 2
                 || binding.derivation_profile != PROFILE
                 || binding.environment != settings.environment()
-                || binding.grpc_endpoint != settings.grpc_endpoint()
+                || binding.operator_rest_url != settings.operator_rest_url()
             {
                 return Err(Error::Storage);
             }
@@ -80,9 +80,9 @@ impl ReceiveStore {
         let (metadata, database) = self.inspect(settings)?;
         if !metadata {
             let bytes = serde_json::to_vec(&Metadata {
-                version: 1,
+                version: 2,
                 environment: settings.environment().to_owned(),
-                grpc_endpoint: settings.grpc_endpoint().to_owned(),
+                operator_rest_url: settings.operator_rest_url().to_owned(),
                 derivation_profile: PROFILE.to_owned(),
             })
             .map_err(|_| Error::Storage)?;
@@ -120,14 +120,15 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
-    const VALID: &str = r#"{"version":1,"environment":"mutinynet","grpc_endpoint":"https://localhost:7070","derivation_profile":"sdk65b383e-default-empty-passphrase-index0"}"#;
+    const VALID: &str = r#"{"version":2,"environment":"mutinynet","operator_rest_url":"https://localhost:7070","derivation_profile":"sdk65b383e-default-empty-passphrase-index0"}"#;
 
     #[test]
     fn metadata_is_strict_bounded_and_not_rewritten() {
         for invalid in [
-            VALID.replace("\"version\":1", "\"version\":2"),
-            VALID.replace("\"version\":1", "\"version\":1,\"version\":1"),
-            VALID.replace("\"version\":1", "\"version\":1,\"extra\":true"),
+            VALID.replace("\"version\":2", "\"version\":1"),
+            VALID.replace("\"version\":2", "\"version\":3"),
+            VALID.replace("\"version\":2", "\"version\":2,\"version\":2"),
+            VALID.replace("\"version\":2", "\"version\":2,\"extra\":true"),
             VALID.replace("sdk65b383e-default-empty-passphrase-index0", "custom"),
             VALID.replace("mutinynet", "unknown"),
             VALID.replace("https://localhost:7070", "https://localhost:7070/"),

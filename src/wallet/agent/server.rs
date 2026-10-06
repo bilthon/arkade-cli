@@ -121,7 +121,9 @@ async fn receive<F, Fut>(
 ) -> Result<String, Error>
 where
     F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = Result<ark_core::server::Info, Error>>,
+    Fut: std::future::Future<
+        Output = Result<(crate::config::ReceiveSettings, ark_core::server::Info), Error>,
+    >,
 {
     let (name, deadline, mut session, identity) = {
         let mut state = coordinator.state.lock().unwrap();
@@ -133,13 +135,16 @@ where
         // At most the existing 32 admitted connections can wait here. Controls
         // bypass this lock. Cancellation removes the waiter or drops the guard.
         let _serial = coordinator.receive.lock().await;
-        let settings = load_receive_settings(&agent.home).map_err(|_| Error::Receive)?;
-        let store = ReceiveStore::open_existing(&agent.home, &name).map_err(|_| Error::Receive)?;
-        store.check_binding(&settings).map_err(|_| Error::Receive)?;
-        let info = info(settings.grpc_endpoint().to_owned()).await?;
-        if receive::network(&settings)? != info.network {
-            return Err(Error::Receive);
-        }
+        let operator = load_receive_settings(&agent.home).map_err(|error| match error {
+            crate::config::ReceiveConfigError::MissingOperator => Error::ReceiveMissingOperator,
+            crate::config::ReceiveConfigError::Invalid => Error::ReceiveConfig,
+        })?;
+        let store =
+            ReceiveStore::open_existing(&agent.home, &name).map_err(|_| Error::ReceiveStorage)?;
+        let (settings, info) = info(operator.url().to_owned()).await?;
+        store
+            .check_binding(&settings)
+            .map_err(|_| Error::ReceiveStorage)?;
         still_connected(stream)?;
         let owner = {
             let mut state = coordinator.state.lock().unwrap();
@@ -291,39 +296,42 @@ mod tests {
     use bitcoin::{Network, PublicKey, Sequence};
     use std::{fs, os::unix::fs::PermissionsExt, str::FromStr};
 
-    fn info() -> Info {
+    fn info() -> (crate::config::ReceiveSettings, Info) {
         let signer = PublicKey::from_str(
             "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         )
         .unwrap();
-        Info {
-            version: "synthetic".into(),
-            signer_pk: signer.inner,
-            forfeit_pk: signer.inner,
-            forfeit_address: bitcoin::Address::p2tr(
-                &bitcoin::secp256k1::Secp256k1::new(),
-                signer.inner.x_only_public_key().0,
-                None,
-                Network::Regtest,
-            ),
-            checkpoint_tapscript: bitcoin::ScriptBuf::new(),
-            network: Network::Regtest,
-            session_duration: 10,
-            unilateral_exit_delay: Sequence::from_height(144),
-            boarding_exit_delay: Sequence::from_height(144),
-            utxo_min_amount: None,
-            utxo_max_amount: None,
-            vtxo_min_amount: None,
-            vtxo_max_amount: None,
-            dust: bitcoin::Amount::from_sat(330),
-            fees: None,
-            scheduled_session: None,
-            deprecated_signers: vec![],
-            service_status: Default::default(),
-            digest: "synthetic".into(),
-            max_tx_weight: 0,
-            max_op_return_outputs: 0,
-        }
+        (
+            crate::config::ReceiveSettings::new("regtest", "http://127.0.0.1:1").unwrap(),
+            Info {
+                version: "synthetic".into(),
+                signer_pk: signer.inner,
+                forfeit_pk: signer.inner,
+                forfeit_address: bitcoin::Address::p2tr(
+                    &bitcoin::secp256k1::Secp256k1::new(),
+                    signer.inner.x_only_public_key().0,
+                    None,
+                    Network::Regtest,
+                ),
+                checkpoint_tapscript: bitcoin::ScriptBuf::new(),
+                network: Network::Regtest,
+                session_duration: 10,
+                unilateral_exit_delay: Sequence::from_height(144),
+                boarding_exit_delay: Sequence::from_height(144),
+                utxo_min_amount: None,
+                utxo_max_amount: None,
+                vtxo_min_amount: None,
+                vtxo_max_amount: None,
+                dust: bitcoin::Amount::from_sat(330),
+                fees: None,
+                scheduled_session: None,
+                deprecated_signers: vec![],
+                service_status: Default::default(),
+                digest: "synthetic".into(),
+                max_tx_weight: 0,
+                max_op_return_outputs: 0,
+            },
+        )
     }
     fn receive_fixture() -> (tempfile::TempDir, Agent, Arc<Coordinator>) {
         let home = tempfile::tempdir().unwrap();
@@ -334,7 +342,7 @@ mod tests {
         }
         fs::write(
             home.path().join(".akcli/config.toml"),
-            "[wallet.receive]\nenvironment = 'regtest'\ngrpc_endpoint = 'http://127.0.0.1:1'\n",
+            "operator = 'http://127.0.0.1:1'\n",
         )
         .unwrap();
         let agent = Agent::new(home.path().to_owned(), Default::default()).unwrap();
@@ -397,9 +405,7 @@ mod tests {
         let (_client, mut stream) = UnixStream::pair().unwrap();
         let dir = home.path().join(".akcli/wallets/alice");
         assert!(receive(&mut stream, &agent, &coordinator, |_| async {
-            let mut wrong = info();
-            wrong.network = Network::Bitcoin;
-            Ok(wrong)
+            Err(Error::ReceiveInfo)
         })
         .await
         .is_err());
@@ -421,7 +427,7 @@ mod tests {
         .is_err());
         assert!(!dir.join("metadata.json").exists());
         fs::write(&config_path, valid_config).unwrap();
-        let settings = load_receive_settings(&agent.home).unwrap();
+        let settings = info().0;
         let store = ReceiveStore::open_existing(&agent.home, &name()).unwrap();
         store.initialize(&settings).unwrap();
         fs::write(store.database_path(), b"not a sqlite database").unwrap();
@@ -436,11 +442,11 @@ mod tests {
         );
         fs::write(
             home.path().join(".akcli/config.toml"),
-            "[wallet.receive]\nenvironment='signet'\ngrpc_endpoint='http://127.0.0.1:1'\n",
+            "operator = 'invalid'\n",
         )
         .unwrap();
         assert!(receive(&mut stream, &agent, &coordinator, |_| async {
-            panic!("binding conflict must be rejected before network")
+            panic!("invalid URL must be rejected before network")
         })
         .await
         .is_err());
@@ -449,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_auxiliaries_are_private_and_failed_insert_returns_no_address() {
         let (_home, agent, coordinator) = receive_fixture();
-        let settings = load_receive_settings(&agent.home).unwrap();
+        let settings = info().0;
         let store = ReceiveStore::open_existing(&agent.home, &name()).unwrap();
         store.initialize(&settings).unwrap();
         let sqlite = SqliteContractStore::new(store.database_path()).unwrap();
@@ -473,11 +479,11 @@ mod tests {
         assert!(sqlite.list().unwrap().is_empty());
         let wal = store.database_path().with_file_name("contracts.db-wal");
         fs::set_permissions(&wal, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(receive(&mut stream, &agent, &coordinator, |_| async {
-            panic!("unsafe auxiliary must fail before network")
-        })
-        .await
-        .is_err());
+        assert!(
+            receive(&mut stream, &agent, &coordinator, |_| async { Ok(info()) })
+                .await
+                .is_err()
+        );
     }
 
     struct Dropped(Arc<std::sync::atomic::AtomicBool>);
@@ -509,7 +515,7 @@ mod tests {
                     receive(&mut stream, &agent, &shared, |_| async move {
                         let _guard = guard;
                         let _ = started.send(());
-                        std::future::pending::<Result<Info, Error>>().await
+                        std::future::pending::<Result<(crate::config::ReceiveSettings, Info), Error>>().await
                     }),
                 )
                 .await

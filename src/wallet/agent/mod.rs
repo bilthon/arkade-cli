@@ -33,6 +33,20 @@ pub enum Error {
     Unlock,
     #[error("unable to receive with this wallet session")]
     Receive,
+    #[error("set operator in .akcli/config.toml to receive")]
+    ReceiveMissingOperator,
+    #[error("invalid receive configuration; set operator to an HTTP(S) base URL without credentials, query or fragment")]
+    ReceiveConfig,
+    #[error("cannot connect to operator; check configured operator and connectivity")]
+    ReceiveConnection,
+    #[error("operator HTTP request failed; check configured operator and service availability")]
+    ReceiveHttp,
+    #[error("invalid operator information; check operator compatibility")]
+    ReceiveInfo,
+    #[error(
+        "unsafe or incompatible receive storage binding; check operator and wallet association"
+    )]
+    ReceiveStorage,
     #[error("wallet agent is unsupported on this platform")]
     Unsupported,
 }
@@ -111,6 +125,20 @@ impl Agent {
         #[cfg(unix)]
         {
             runtime::call(self, protocol::STATUS, None).await
+        }
+        #[cfg(not(unix))]
+        {
+            Err(Error::Unsupported)
+        }
+    }
+    /// Returns a validated public address for the unlocked wallet. Never starts
+    /// an agent, unlocks a wallet, or renews the lease.
+    pub async fn receive(&self) -> Result<String, Error> {
+        #[cfg(unix)]
+        {
+            protocol::parse_receive_response(
+                &runtime::call_frame(self, protocol::RECEIVE, None).await?,
+            )
         }
         #[cfg(not(unix))]
         {

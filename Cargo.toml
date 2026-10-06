@@ -24,8 +24,7 @@ thiserror = "1"
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 ark-core = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567" }
-ark-client = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567", default-features = false, features = ["sqlite", "tls-webpki-roots"] }
-ark-grpc = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567" }
+ark-client = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567", default-features = false, features = ["sqlite"] }
 bitcoin = "0.32.7"
 bech32 = "0.11"
 base64 = "0.22.1"
@@ -44,11 +43,7 @@ rustix = { version = "=1.1.4", features = ["fs", "process", "termios"] }
 rustix = { version = "=1.1.4", features = ["pty"] }
 
 [dev-dependencies]
-# Exercise the real gRPC client and SQLite files against local synthetic fixtures.
-ark-grpc = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567", features = ["test-utils"] }
-h2 = "=0.4.19"
-http = "=1.5.0"
-prost = "=0.14.4"
+# Exercise SDK REST conversion and SQLite files against local synthetic fixtures.
 rusqlite = "=0.32.1"
 tempfile = "3"
 wiremock = "0.6"

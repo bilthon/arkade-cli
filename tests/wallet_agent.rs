@@ -34,16 +34,49 @@ impl Fixture {
             Options::new(Duration::from_secs(seconds)).unwrap(),
         )
         .unwrap();
+        let fixture = Self { home, agent };
+        fixture.start(seconds);
+        fixture
+    }
+    fn start(&self, seconds: u64) {
         let output = Command::new(env!("CARGO_BIN_EXE_akcli"))
             .env_clear()
             .args(["--wallet-agent-internal", "ensure"])
-            .arg(path)
+            .arg(self.home.path().canonicalize().unwrap())
             .arg(seconds.to_string())
             .stdin(Stdio::null())
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
-        Self { home, agent }
+    }
+    async fn cli_receive(&self, json: bool) -> std::process::Output {
+        let home = self.home.path().to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_akcli"));
+            command
+                .env_clear()
+                .env("HOME", home)
+                .args(["wallet", "receive"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if json {
+                command.arg("--json");
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(35);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("receive CLI timed out");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            child.wait_with_output().unwrap()
+        })
+        .await
+        .unwrap()
     }
     fn socket(&self) -> PathBuf {
         self.home.path().join(".akcli/run/agent.sock")
@@ -79,58 +112,34 @@ impl Drop for Fixture {
     }
 }
 
-// Real SDK transport, local HTTP/2 + official protobuf only; no operator or funds.
-async fn mock_info() -> (String, tokio::task::JoinHandle<()>) {
-    use prost::Message;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        for _ in 0..2 {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut connection = h2::server::handshake(socket).await.unwrap();
-            let (request, mut respond) = connection.accept().await.unwrap().unwrap();
-            assert_eq!(request.uri().path(), "/ark.v1.ArkService/GetInfo");
-            let signer: bitcoin::secp256k1::PublicKey =
-                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-                    .parse()
-                    .unwrap();
-            let message = ark_grpc::test_utils::GetInfoResponse {
-                signer_pubkey: signer.to_string(),
-                forfeit_pubkey: signer.to_string(),
-                forfeit_address: bitcoin::Address::p2tr(
-                    &bitcoin::secp256k1::Secp256k1::new(),
-                    signer.x_only_public_key().0,
-                    None,
-                    bitcoin::Network::Regtest,
-                )
-                .to_string(),
-                network: "regtest".into(),
-                unilateral_exit_delay: 144,
-                boarding_exit_delay: 144,
-                ..Default::default()
-            }
-            .encode_to_vec();
-            let mut body = vec![0];
-            body.extend_from_slice(&(message.len() as u32).to_be_bytes());
-            body.extend_from_slice(&message);
-            let mut response = respond
-                .send_response(
-                    http::Response::builder()
-                        .header("content-type", "application/grpc")
-                        .body(())
-                        .unwrap(),
-                    false,
-                )
-                .unwrap();
-            response.send_data(body.into(), false).unwrap();
-            let mut trailers = http::HeaderMap::new();
-            trailers.insert("grpc-status", "0".parse().unwrap());
-            response.send_trailers(trailers).unwrap();
-            // Keep polling the connection until the one-request SDK client drops it.
-            while connection.accept().await.is_some() {}
-        }
-    });
-    (endpoint, task)
+// Real SDK REST conversion against synthetic localhost data; no operator or funds.
+fn info_body(network: &str) -> serde_json::Value {
+    let signer: bitcoin::secp256k1::PublicKey =
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            .parse()
+            .unwrap();
+    let sdk_network: ark_core::server::Network = network.parse().unwrap();
+    serde_json::json!({
+        "version": "synthetic", "signerPubkey": signer.to_string(),
+        "forfeitPubkey": signer.to_string(),
+        "forfeitAddress": bitcoin::Address::p2tr(
+            &bitcoin::secp256k1::Secp256k1::new(), signer.x_only_public_key().0,
+            None, bitcoin::Network::from(sdk_network)).to_string(),
+        "network": network, "checkpointTapscript": "",
+        "unilateralExitDelay": "144", "boardingExitDelay": "144",
+        "sessionDuration": "10", "dust": "330",
+        "maxTxWeight": "0", "maxOpReturnOutputs": "0"
+    })
+}
+async fn mock_info(requests: usize) -> (String, wiremock::MockServer) {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/v1/info"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(info_body("regtest")))
+        .expect(requests as u64)
+        .mount(&server)
+        .await;
+    (server.uri(), server)
 }
 async fn receive_frame(fixture: &Fixture) -> Vec<u8> {
     let mut stream = UnixStream::connect(fixture.socket()).await.unwrap();
@@ -146,10 +155,10 @@ async fn receive_ipc_uses_real_sdk_local_info_and_reuses_persisted_address() {
     let fixture = Fixture::new(60);
     fixture.create("alice");
     fixture.unlock("alice").await;
-    let (endpoint, mock) = mock_info().await;
+    let (endpoint, mock) = mock_info(2).await;
     std::fs::write(
         fixture.home.path().join(".akcli/config.toml"),
-        format!("[wallet.receive]\nenvironment='regtest'\ngrpc_endpoint='{endpoint}'\n"),
+        format!("operator='{endpoint}'\n"),
     )
     .unwrap();
     let first = receive_frame(&fixture).await;
@@ -157,9 +166,203 @@ async fn receive_ipc_uses_real_sdk_local_info_and_reuses_persisted_address() {
     let address = std::str::from_utf8(&first[2..]).unwrap();
     assert!(ark_core::ArkAddress::decode(address).is_ok());
     assert_eq!(receive_frame(&fixture).await, first);
-    mock.await.unwrap();
+    mock.verify().await;
     fixture.agent.lock().await.unwrap();
     assert_eq!(receive_frame(&fixture).await, [1, 4]);
+}
+
+#[tokio::test]
+async fn receive_cli_reuses_persisted_contract_and_fails_closed() {
+    let fixture = Fixture::new(60);
+    let wallets = fixture.home.path().join(".akcli/wallets");
+    let locked = fixture.cli_receive(false).await;
+    assert_eq!(locked.status.code(), Some(1));
+    assert!(locked.stdout.is_empty());
+    assert!(!wallets.exists());
+    assert!(!fixture.home.path().join(".akcli/config.toml").exists());
+
+    fixture.create("alice");
+    fixture.unlock("alice").await;
+    let config = fixture.home.path().join(".akcli/config.toml");
+    std::fs::write(&config, "operator=42\n").unwrap();
+    let invalid = fixture.cli_receive(false).await;
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(invalid.stdout.is_empty());
+    assert!(!wallets.join("alice/metadata.json").exists());
+    assert!(!wallets.join("alice/contracts.db").exists());
+
+    let (endpoint, mock) = mock_info(3).await;
+    std::fs::write(&config, format!("operator='{endpoint}'\n")).unwrap();
+    let first = fixture.cli_receive(false).await;
+    assert!(first.status.success(), "{first:?}");
+    let text = String::from_utf8(first.stdout).unwrap();
+    let address = text
+        .strip_prefix("Address: ")
+        .unwrap()
+        .strip_suffix('\n')
+        .unwrap();
+    assert!(ark_core::ArkAddress::decode(address).is_ok());
+    assert_eq!(address, "tark1qpumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqte3egkjh5ls9mvgks7uczg0xv5s4pgkqt6ufmrt3qx0cfym0ja4y7t4pgslm");
+    assert!(wallets.join("alice/contracts.db").is_file());
+    let metadata = std::fs::read(wallets.join("alice/metadata.json")).unwrap();
+    let repeated = fixture.cli_receive(true).await;
+    assert!(repeated.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&repeated.stdout).unwrap(),
+        serde_json::json!({"address": address})
+    );
+
+    fixture.agent.stop().await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture.socket().exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let absent = fixture.cli_receive(false).await;
+    assert_eq!(absent.status.code(), Some(1));
+    assert!(absent.stdout.is_empty());
+    assert!(!fixture.socket().exists());
+    fixture.start(60);
+    fixture.unlock("alice").await;
+    let restarted = fixture.cli_receive(false).await;
+    assert!(restarted.status.success());
+    assert_eq!(restarted.stdout, text.as_bytes());
+    assert_eq!(
+        std::fs::read(wallets.join("alice/metadata.json")).unwrap(),
+        metadata
+    );
+
+    mock.verify().await;
+    mock.reset().await;
+    wiremock::Mock::given(wiremock::matchers::path("/v1/info"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(info_body("bitcoin")))
+        .mount(&mock)
+        .await;
+    let database = std::fs::read(wallets.join("alice/contracts.db")).unwrap();
+    let mismatch = fixture.cli_receive(false).await;
+    assert_eq!(mismatch.status.code(), Some(1));
+    assert!(mismatch.stdout.is_empty());
+    assert_eq!(String::from_utf8(mismatch.stderr).unwrap(), "error: unsafe or incompatible receive storage binding; check operator and wallet association\n");
+    assert_eq!(
+        std::fs::read(wallets.join("alice/metadata.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        std::fs::read(wallets.join("alice/contracts.db")).unwrap(),
+        database
+    );
+}
+
+#[tokio::test]
+async fn receive_rest_errors_are_static_and_never_initialize_storage() {
+    let fixture = Fixture::new(60);
+    fixture.create("alice");
+    fixture.unlock("alice").await;
+    let config = fixture.home.path().join(".akcli/config.toml");
+    let missing = fixture.cli_receive(false).await;
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        missing.stderr,
+        b"error: set operator in .akcli/config.toml to receive\n"
+    );
+    assert!(missing.stdout.is_empty());
+    assert_eq!(receive_frame(&fixture).await, [1, 6]);
+    std::fs::write(&config, "operator='http://secret-marker@localhost'\n").unwrap();
+    assert_eq!(receive_frame(&fixture).await, [1, 7]);
+
+    let mock = wiremock::MockServer::start().await;
+    std::fs::write(&config, format!("operator='{}'", mock.uri())).unwrap();
+    let mut invalid = info_body("regtest");
+    invalid["forfeitPubkey"] = "secret-marker".into();
+    let mut invalid_network = info_body("regtest");
+    invalid_network["network"] = "secret-marker".into();
+    for (response, tag) in [
+        (
+            wiremock::ResponseTemplate::new(503).set_body_string("secret-marker"),
+            9,
+        ),
+        (
+            wiremock::ResponseTemplate::new(200).set_body_string("secret-marker"),
+            10,
+        ),
+        (
+            wiremock::ResponseTemplate::new(200).set_body_json(invalid),
+            10,
+        ),
+        (
+            wiremock::ResponseTemplate::new(200).set_body_json(invalid_network),
+            10,
+        ),
+        (
+            wiremock::ResponseTemplate::new(200)
+                .set_body_string("secret-marker")
+                .set_delay(Duration::from_secs(15)),
+            8,
+        ),
+    ] {
+        mock.reset().await;
+        wiremock::Mock::given(wiremock::matchers::path("/v1/info"))
+            .respond_with(response)
+            .mount(&mock)
+            .await;
+        assert_eq!(receive_frame(&fixture).await, [1, tag]);
+        let dir = fixture.home.path().join(".akcli/wallets/alice");
+        assert!(!dir.join("metadata.json").exists());
+        assert!(!dir.join("contracts.db").exists());
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    std::fs::write(&config, format!("operator='http://{address}'")).unwrap();
+    assert_eq!(receive_frame(&fixture).await, [1, 8]);
+}
+
+#[tokio::test]
+async fn receive_preserves_mutinynet_binding_and_rejects_url_and_legacy_changes() {
+    let fixture = Fixture::new(60);
+    fixture.create("alice");
+    fixture.unlock("alice").await;
+    let mock = wiremock::MockServer::start().await;
+    let config = fixture.home.path().join(".akcli/config.toml");
+    std::fs::write(&config, format!("operator='{}'", mock.uri())).unwrap();
+    wiremock::Mock::given(wiremock::matchers::path("/v1/info"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(info_body("mutinynet")))
+        .mount(&mock)
+        .await;
+    assert_eq!(&receive_frame(&fixture).await[..2], &[1, 5]);
+    let dir = fixture.home.path().join(".akcli/wallets/alice");
+    let metadata = std::fs::read(dir.join("metadata.json")).unwrap();
+    let database = std::fs::read(dir.join("contracts.db")).unwrap();
+    let mut binding: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+    assert_eq!(binding["version"], 2);
+    assert_eq!(binding["environment"], "mutinynet");
+    assert_eq!(binding["operator_rest_url"], mock.uri());
+    mock.reset().await;
+    wiremock::Mock::given(wiremock::matchers::path("/v1/info"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(info_body("signet")))
+        .mount(&mock)
+        .await;
+    assert_eq!(receive_frame(&fixture).await, [1, 11]);
+    assert_eq!(std::fs::read(dir.join("metadata.json")).unwrap(), metadata);
+    assert_eq!(std::fs::read(dir.join("contracts.db")).unwrap(), database);
+
+    let other = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/v1/info"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(info_body("mutinynet")))
+        .mount(&other)
+        .await;
+    std::fs::write(&config, format!("operator='{}'", other.uri())).unwrap();
+    assert_eq!(receive_frame(&fixture).await, [1, 11]);
+    assert_eq!(std::fs::read(dir.join("metadata.json")).unwrap(), metadata);
+    assert_eq!(std::fs::read(dir.join("contracts.db")).unwrap(), database);
+    binding["version"] = 1.into();
+    binding["grpc_endpoint"] = binding["operator_rest_url"].take();
+    binding.as_object_mut().unwrap().remove("operator_rest_url");
+    let legacy = serde_json::to_vec(&binding).unwrap();
+    std::fs::write(dir.join("metadata.json"), &legacy).unwrap();
+    assert_eq!(receive_frame(&fixture).await, [1, 11]);
+    assert_eq!(std::fs::read(dir.join("metadata.json")).unwrap(), legacy);
+    assert_eq!(std::fs::read(dir.join("contracts.db")).unwrap(), database);
 }
 
 #[tokio::test]
@@ -170,10 +373,7 @@ async fn receive_ipc_network_wait_keeps_controls_responsive_and_lock_cancels() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     std::fs::write(
         fixture.home.path().join(".akcli/config.toml"),
-        format!(
-            "[wallet.receive]\nenvironment='regtest'\ngrpc_endpoint='http://{}'\n",
-            listener.local_addr().unwrap()
-        ),
+        format!("operator='http://{}'\n", listener.local_addr().unwrap()),
     )
     .unwrap();
     let mut stream = UnixStream::connect(fixture.socket()).await.unwrap();

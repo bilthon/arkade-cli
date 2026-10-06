@@ -4,8 +4,9 @@ A small, read-only explorer for Arkade virtual transactions and outputs — thin
 of the exploratory convenience of `bitcoin-cli`, but for Arkade VTXOs.
 
 Explorer commands are **read-only**. Local `wallet` commands additionally store
-encrypted BIP39 mnemonics and manage a private, on-demand memory agent. This is a
-wallet foundation only: no funds, signing, derivation, balance, or addresses.
+encrypted BIP39 mnemonics and manage a private, on-demand memory agent. Receive
+addresses are available through the pinned SDK; balance, send, on-chain wallet,
+sync, and complete recovery are not implemented.
 
 ## Install
 
@@ -30,7 +31,7 @@ Ensure Cargo's bin directory is on your `PATH`.
 
 ## Configuration
 
-The operator base URL is resolved with this precedence:
+For explorer commands, the operator base URL is resolved with this precedence:
 
 1. `--operator <url>` flag
 2. `operator` in `~/.akcli/config.toml`
@@ -51,6 +52,7 @@ akcli wallet import existing
 akcli wallet list
 akcli wallet unlock personal
 akcli wallet status
+akcli wallet receive                    # requires receive configuration below
 akcli wallet lock
 akcli wallet agent stop
 ```
@@ -62,8 +64,9 @@ only). It saves the encrypted file **before** explicitly displaying the new
 phrase on the terminal. Cancelling after publication retains that file,
 even without backup acknowledgement. No command exports a stored phrase.
 
-Wallet commands require an absolute `HOME`, not an operator. `--json` contains
-only public names/results/status; it never contains passwords or phrases.
+Wallet commands require an absolute `HOME`. Receive uses the existing top-level
+REST `operator` configuration; other wallet commands do not require it. `--json` contains only public names/results/status or a
+receive address; it never contains passwords or phrases.
 The file password is **not** a BIP39 passphrase, and a mnemonic alone is not a
 guaranteed complete recovery backup. See [wallet usage and limits](docs/wallet-cli.md).
 
@@ -76,6 +79,27 @@ idle_timeout_seconds = 600
 
 Only unlock reads these settings (integer 1–86400, default 600). An existing agent
 keeps its original timeout: explicitly stop it, then unlock to apply changes.
+
+Receive uses `operator` from the config example above, before any TOML table
+headers. No `[wallet.receive]`, environment, or gRPC endpoint is required.
+The first validated `GET /v1/info` response establishes the network; metadata v2
+binds its environment and normalized REST URL. Changes and legacy v1 bindings
+fail closed without migration. Receive rejects `--operator`; edit persistent
+configuration instead. Errors are sanitized and distinguish configuration,
+connection/timeout, HTTP, invalid info, and storage binding failures.
+
+After unlocking, run
+`akcli wallet receive` (or `cargo run -- wallet receive` from a source checkout).
+It prints `Address: <address>`, or `{"address":"<address>"}` with `--json`.
+There are no receive arguments or password prompts, automatic unlock/start, or
+lease renewal. Older daemons may require manual `akcli wallet agent stop` and
+re-unlock with the current binary; receive never silently restarts them.
+
+Receive uses an **empty BIP39 passphrase**, not the file-encryption password, and
+reuses SDK owner index 0 across requests/restarts. An operator signer/policy change
+can change the address; this is not rotation. Public `contracts.db` and
+`metadata.json` are persisted beside the encrypted wallet with owner-only
+permissions; they are not encrypted. A mnemonic alone is not a full recovery backup.
 
 ## Usage
 
@@ -235,8 +259,8 @@ Implemented: operator information (`info`), address VTXO listing (`address`),
 one VTXO (`vtxo`), one commitment transaction (`tx`), and virtual transaction
 PSBT inspection (`virtual-tx`), and script inspection (`script`). Ancestry tracing
 is not implemented yet. Encrypted named mnemonic storage and interactive local
-wallet-agent commands are also available on macOS/Linux; they do not yet provide
-an operational funds wallet.
+wallet-agent commands and receive addresses are also available on macOS/Linux;
+they do not yet provide balance, spending, or complete recovery.
 
 Built on the official [Arkade Rust SDK](https://github.com/arkade-os/rust-sdk)
 (`ark-rest` and `ark-core`, pinned to the same revision).

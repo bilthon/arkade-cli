@@ -28,6 +28,8 @@ pub enum Command {
     Unlock { name: String },
     /// Show whether the local agent is running and which wallet is unlocked.
     Status,
+    /// Show a receive address for the currently unlocked wallet (reuses index 0).
+    Receive,
     /// Forget the agent's retained mnemonic.
     Lock,
     /// Manage the local wallet agent.
@@ -212,6 +214,20 @@ pub async fn run(command: &Command, json: bool) -> anyhow::Result<()> {
         | Command::List
         | Command::Unlock { .. } => {
             anyhow::bail!("interactive wallets are unsupported on this platform");
+        }
+        Command::Receive => {
+            let address = agent.receive().await.map_err(|error| match error {
+                Error::Protocol | Error::Timeout => anyhow::anyhow!(
+                    "{error}; an older agent may not support receive. Run `akcli wallet agent stop`, then unlock again and retry"
+                ),
+                _ => error.into(),
+            })?;
+            if json {
+                println!("{}", serde_json::json!({ "address": address }));
+            } else {
+                println!("Address: {address}");
+            }
+            return Ok(());
         }
         Command::Status => match agent.status().await {
             Ok(status) => (true, status),

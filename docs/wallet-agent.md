@@ -3,9 +3,10 @@
 The local agent retains **one** unlocked mnemonic in memory. Its private receive
 operation derives a fixed-index address through the pinned SDK and persists the
 public contract before responding. It does not sign, sync, or return mnemonic
-material. The public receive CLI is not available yet (R3). Interactive wallet
-commands and wallet-only TOML configuration are described in
-[wallet-cli.md](wallet-cli.md). They do not require operator configuration.
+material. `akcli wallet receive` exposes this operation for the currently unlocked
+wallet. Interactive wallet commands and shared REST operator configuration are
+described in [wallet-cli.md](wallet-cli.md). Other wallet commands do not require
+operator configuration.
 
 ## Interface and lease
 
@@ -14,7 +15,9 @@ there is no HOME, explorer-config, or operator lookup. `Options::default()` uses
 600 seconds. `Options::new(Duration)` accepts whole seconds from 1 through 86,400.
 
 The async interface is `ensure_running`, `unlock(&WalletName, Secret)`, `status`,
-`lock`, and `stop`. Call `ensure_running` before unlocking. It launches the current
+`receive`, `lock`, and `stop`. `receive()` returns only a validated SDK address,
+never status or mnemonic data; it does not start or unlock an agent.
+Call `ensure_running` before unlocking. It launches the current
 executable, which must dispatch `agent::internal_entry()` before normal startup.
 An existing agent keeps its original options; changing the lease requires restart.
 Successful `status` and `unlock` return only `Locked` or
@@ -96,8 +99,18 @@ no input; fixed error responses contain no secret or filesystem details.
 Responses contain only version, a fixed result code, and optionally a validated
 public wallet name. Receive uses opcode 5; its success payload is version 1,
 result code 5, and an ASCII address (1–512 bytes), with no mnemonic or backend
-error text. Failure uses the existing generic code 4. Existing response encodings
-are unchanged. This is not JSON and is not a stable external protocol.
+error text. Session failure retains generic code 4. Receive-only error codes 6–11
+mean missing operator, invalid config, connection/timeout, HTTP failure, invalid
+info, and unsafe/incompatible storage respectively. Errors are exactly two bytes;
+unknown tags, trailing payloads, and receive tags in status responses are rejected.
+Existing response encodings are unchanged. The client rejects empty, oversized, non-ASCII/control-bearing,
+and SDK-invalid addresses before output. Receive and status decoders reject each
+other's success tags. The existing bounded frame reader, authenticated non-creating
+transport, and client deadlines are shared. Generic receive errors reveal no
+backend details. Older daemons that close on opcode 5 yield an error, never a
+false status-based success; the CLI advises manual stop and re-unlock rather than
+automatically replacing an unlocked agent.
+This is not JSON and is not a stable external protocol.
 
 There is one request per connection, no pipelining. Payload length must match its
 schema exactly. Trailing bytes already available are rejected; any further data
@@ -116,13 +129,16 @@ invalidates first, rejects further work, cancels request tasks, then waits for
 the one possible worker to finish and drop its result before releasing the lock.
 Control requests and expiry do not wait for the KDF.
 
-## Receive lifecycle (R2)
+## Receive lifecycle
 
-Each receive reloads `[wallet.receive]` from the agent's absolute home. It checks
-existing storage/binding without writes, fetches operator info with `ark_grpc`,
-checks the configured Bitcoin network family, and revalidates the session before
-initialization. Explicit Signet/Mutinynet bindings remain distinct locally; typed
-SDK info cannot distinguish them remotely. No explorer endpoint is reused.
+Each receive reloads top-level `operator` from the agent's absolute home and
+opens existing storage without writes. The existing `IndexerClient` fetches
+`GET /v1/info` with a 10-second timeout. The raw environment is validated through
+SDK `Network` and the same response converts through SDK `TryInto<Info>`.
+The first valid response establishes the network. Metadata v2 binds the raw
+environment (including distinct Signet/Mutinynet), normalized REST URL and profile.
+The complete binding is checked before derivation or writes, and the session is
+revalidated before initialization. No config environment or wire URL override exists.
 
 A request-local `Bip32KeyProvider` derives normal index 0 at the SDK default path
 `m/83696968'/11811'/0`, using an empty BIP39 passphrase and explicit network.

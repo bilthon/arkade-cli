@@ -264,7 +264,6 @@ dependencies = [
  "argon2",
  "ark-client",
  "ark-core",
- "ark-grpc",
  "ark-rest",
  "base64 0.22.1",
  "bech32",
@@ -275,9 +274,6 @@ dependencies = [
  "clap",
  "directories",
  "getrandom 0.3.4",
- "h2",
- "http",
- "prost 0.14.4",
  "reqwest",
  "rusqlite",
  "rustix",
@@ -2838,7 +2834,6 @@ version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
- "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3728,13 +3723,11 @@ dependencies = [
  "socket2",
  "sync_wrapper",
  "tokio",
- "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",
  "tower-service",
  "tracing",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]

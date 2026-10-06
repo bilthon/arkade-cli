@@ -127,7 +127,7 @@ pub(super) fn response(value: Result<Status, Error>) -> Vec<u8> {
     }
 }
 // Receive success is address-only, with its own tag. Existing status/error
-// encodings are unchanged. R3 will add the client-side address decoder.
+// encodings are unchanged.
 pub(super) fn receive_response(value: Result<String, Error>) -> Vec<u8> {
     match value {
         Ok(address) if !address.is_empty() && address.len() <= 512 && address.is_ascii() => {
@@ -135,9 +135,38 @@ pub(super) fn receive_response(value: Result<String, Error>) -> Vec<u8> {
             bytes.extend_from_slice(address.as_bytes());
             bytes
         }
+        Err(Error::ReceiveMissingOperator) => vec![VERSION, 6],
+        Err(Error::ReceiveConfig) => vec![VERSION, 7],
+        Err(Error::ReceiveConnection) => vec![VERSION, 8],
+        Err(Error::ReceiveHttp) => vec![VERSION, 9],
+        Err(Error::ReceiveInfo) => vec![VERSION, 10],
+        Err(Error::ReceiveStorage) => vec![VERSION, 11],
         _ => response(Err(Error::Receive)),
     }
 }
+pub(super) fn parse_receive_response(bytes: &[u8]) -> Result<String, Error> {
+    match bytes {
+        [VERSION, 4] => return Err(Error::Receive),
+        [VERSION, 6] => return Err(Error::ReceiveMissingOperator),
+        [VERSION, 7] => return Err(Error::ReceiveConfig),
+        [VERSION, 8] => return Err(Error::ReceiveConnection),
+        [VERSION, 9] => return Err(Error::ReceiveHttp),
+        [VERSION, 10] => return Err(Error::ReceiveInfo),
+        [VERSION, 11] => return Err(Error::ReceiveStorage),
+        _ => (),
+    }
+    if !(3..=514).contains(&bytes.len()) || bytes[..2] != [VERSION, RECEIVE] {
+        return Err(Error::Protocol);
+    }
+    let address = &bytes[2..];
+    if !address.iter().all(u8::is_ascii_graphic) {
+        return Err(Error::Protocol);
+    }
+    let address = std::str::from_utf8(address).map_err(|_| Error::Protocol)?;
+    ark_core::ArkAddress::decode(address).map_err(|_| Error::Protocol)?;
+    Ok(address.to_owned())
+}
+
 pub(super) fn parse_response(bytes: &[u8]) -> Result<Status, Error> {
     if bytes.first() != Some(&VERSION) {
         return Err(Error::Protocol);
@@ -172,6 +201,87 @@ mod tests {
         }
         assert_eq!(receive_response(Err(Error::Receive)), [1, 4]);
     }
+    #[test]
+    fn receive_errors_have_exact_static_frames_and_reject_wrong_kinds() {
+        for (tag, error) in [
+            (6, Error::ReceiveMissingOperator),
+            (7, Error::ReceiveConfig),
+            (8, Error::ReceiveConnection),
+            (9, Error::ReceiveHttp),
+            (10, Error::ReceiveInfo),
+            (11, Error::ReceiveStorage),
+        ] {
+            let message = error.to_string();
+            assert_eq!(receive_response(Err(error)), [1, tag]);
+            assert_eq!(
+                parse_receive_response(&[1, tag]).unwrap_err().to_string(),
+                message
+            );
+            assert!(matches!(parse_response(&[1, tag]), Err(Error::Protocol)));
+            assert!(matches!(
+                parse_receive_response(&[1, tag, 0]),
+                Err(Error::Protocol)
+            ));
+        }
+        for tag in 12..=255 {
+            assert!(matches!(
+                parse_receive_response(&[1, tag]),
+                Err(Error::Protocol)
+            ));
+        }
+    }
+    #[test]
+    fn receive_decoder_accepts_only_bounded_sdk_addresses() {
+        let address = "tark1qpumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqte3egkjh5ls9mvgks7uczg0xv5s4pgkqt6ufmrt3qx0cfym0ja4y7t4pgslm";
+        let valid = receive_response(Ok(address.into()));
+        assert_eq!(parse_receive_response(&valid).unwrap(), address);
+        assert!(parse_response(&valid).is_err());
+        assert!(matches!(
+            parse_receive_response(&[1, 4]),
+            Err(Error::Receive)
+        ));
+        for bytes in [
+            vec![],
+            vec![1],
+            vec![1, 5],
+            vec![2, 5],
+            vec![1, 0],
+            b"\x01\x01alice".to_vec(),
+            vec![1, 2],
+            vec![1, 3],
+            vec![1, 4, 0],
+            b"\x01\x05not-an-address".to_vec(),
+            [b"\x01\x05".as_slice(), &vec![b'x'; 513]].concat(),
+            [valid.as_slice(), b"\n"].concat(),
+            [valid.as_slice(), b"\x1b[31m"].concat(),
+            [valid.as_slice(), b"\0"].concat(),
+            [valid.as_slice(), b" "].concat(),
+            [valid.as_slice(), "é".as_bytes()].concat(),
+            valid[..valid.len() - 1].to_vec(),
+        ] {
+            assert!(matches!(
+                parse_receive_response(&bytes),
+                Err(Error::Protocol)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn response_frames_reject_oversized_lengths_and_truncation() {
+        for frame in [
+            u32::MAX.to_be_bytes().to_vec(),
+            ((MAX_FRAME + 1) as u32).to_be_bytes().to_vec(),
+            vec![0, 0, 0, 1, 1],
+            vec![0, 0, 0, 5, 1, 5, b't'],
+            vec![0, 0],
+        ] {
+            let (mut writer, mut reader) = UnixStream::pair().unwrap();
+            writer.write_all(&frame).await.unwrap();
+            writer.shutdown().await.unwrap();
+            assert!(read(&mut reader).await.is_err());
+        }
+    }
+
     #[test]
     fn malformed_payloads_and_uid_policy() {
         for bytes in [

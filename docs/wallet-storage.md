@@ -93,19 +93,22 @@ creates missing roots or wallet children. `check_binding(&ReceiveSettings)` read
 without writes. `initialize(&ReceiveSettings)` rechecks, then writes only receive
 state; callers must validate the operator first. Keep the store alive for the
 SDK database lifetime. The agent retains it while `SqliteContractStore` and
-`ContractManager` are alive. No public wallet command calls receive yet.
+`ContractManager` are alive. `wallet receive` calls this through the agent.
 
 `metadata.json` is strict JSON, bounded to 16 KiB, with exactly these fields:
 
 | Field | Value |
 | --- | --- |
-| `version` | `1` |
-| `environment` | Explicit configured environment, including distinct `signet`/`mutinynet` |
-| `grpc_endpoint` | Normalized configured HTTP/HTTPS authority |
+| `version` | `2` |
+| `environment` | SDK-validated raw REST environment, including distinct `signet`/`mutinynet` |
+| `operator_rest_url` | Normalized configured HTTP/HTTPS authority |
 | `derivation_profile` | `sdk65b383e-default-empty-passphrase-index0` |
 
 Unknown/duplicate fields, unsupported versions/profiles, and conflicting bindings
-are rejected without changes. There is no redundant wallet name, custom derivation,
+are rejected without changes, including legacy version-1 gRPC bindings. There is
+no automatic migration or reset. The environment and typed SDK info come from
+one REST response; binding validation precedes derivation and initialization.
+There is no redundant wallet name, custom derivation,
 or signer binding. The profile fixes the SDK's default `m/83696968'/11811'/0`
 derivation with normal owner index 0 and empty BIP39 passphrase. The encryption
 password is unrelated. Operator signer/policy changes may still change an address.

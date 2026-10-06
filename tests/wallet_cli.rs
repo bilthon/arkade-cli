@@ -61,7 +61,10 @@ fn missing_name_reports_required_argument_without_side_effects() {
     let error = String::from_utf8(output.stderr).unwrap();
     assert_eq!(error.matches("Usage:").count(), 1);
     assert!(error.contains("the following required arguments were not provided:\n  <NAME>"));
-    assert!(error.contains("Usage: akcli wallet create <NAME>"), "{error}");
+    assert!(
+        error.contains("Usage: akcli wallet create <NAME>"),
+        "{error}"
+    );
     assert!(error.contains("For more information, try '--help'."));
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
 }
@@ -103,6 +106,7 @@ fn unsafe_runtime_entries_never_become_idempotent_success() {
         symlink(home.path().join("missing"), run.join(entry)).unwrap();
         for args in [
             vec!["wallet", "status"],
+            vec!["wallet", "receive"],
             vec!["wallet", "lock"],
             vec!["wallet", "agent", "stop"],
         ] {
@@ -117,8 +121,147 @@ fn wallet_help_has_interactive_commands() {
     let output = cli(home.path(), &["wallet", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    for name in ["create", "import", "list", "unlock"] {
+    for name in ["create", "import", "list", "unlock", "receive"] {
         assert!(help.contains(name));
+    }
+}
+
+#[test]
+fn receive_rejects_operator_flag_without_reading_config_or_starting_agent() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec![
+            "--operator",
+            "http://secret-marker.invalid",
+            "wallet",
+            "receive",
+        ],
+        vec![
+            "wallet",
+            "receive",
+            "--operator",
+            "http://secret-marker.invalid",
+        ],
+    ] {
+        let output = cli(home.path(), &args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"error: wallet receive does not accept --operator; set operator in .akcli/config.toml\n");
+        assert!(!home.path().join(".akcli").exists());
+    }
+}
+
+#[test]
+fn receive_is_parameterless_and_never_starts_an_absent_agent() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["wallet", "receive"],
+        vec!["--json", "wallet", "receive"],
+    ] {
+        let output = cli(home.path(), &args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("wallet agent is not running"));
+    }
+    for extra in [
+        "alice",
+        "--amount",
+        "--rotate",
+        "--passphrase",
+        "--password",
+        "--unlock",
+    ] {
+        let output = cli(home.path(), &["wallet", "receive", extra]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn receive_rejects_incompatible_and_malformed_agent_responses_without_restarting() {
+    use std::{
+        io::{Read, Write},
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+        time::{Duration, Instant},
+    };
+    let address = "tark1qpumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqte3egkjh5ls9mvgks7uczg0xv5s4pgkqt6ufmrt3qx0cfym0ja4y7t4pgslm";
+    let address_response = [b"\x01\x05".as_slice(), address.as_bytes()].concat();
+    for (command, response, extra_length) in [
+        ("receive", vec![1, 0], 0),
+        ("receive", b"\x01\x01alice".to_vec(), 0),
+        ("receive", vec![1, 4], 0),
+        ("receive", b"\x01\x05not-an-address".to_vec(), 0),
+        (
+            "receive",
+            [address_response.as_slice(), b"\x1b[31m"].concat(),
+            0,
+        ),
+        (
+            "receive",
+            [b"\x01\x05".as_slice(), &vec![b'x'; 513]].concat(),
+            0,
+        ),
+        ("receive", address_response.clone(), 1),
+        ("receive", vec![], 0), // Older daemons close on unknown opcode 5.
+        ("status", address_response, 0),
+    ] {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let run = home.path().join(".akcli/run");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = run.join("agent.lock");
+        std::fs::write(&lock, []).unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let socket = run.join("agent.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let generic_error = response == [1, 4];
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "client did not connect");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 6];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(
+                request,
+                [0, 0, 0, 2, 1, if command == "receive" { 5 } else { 1 }]
+            );
+            if !response.is_empty() {
+                stream
+                    .write_all(&((response.len() + extra_length) as u32).to_be_bytes())
+                    .unwrap();
+                stream.write_all(&response).unwrap();
+            }
+        });
+        let output = cli(home.path(), &["wallet", command]);
+        server.join().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(!error.contains(address));
+        assert!(!error.contains("not-an-address"));
+        assert!(!error.contains('\x1b'));
+        if command == "receive" && !generic_error {
+            assert!(error.contains("akcli wallet agent stop"));
+            assert!(error.contains("unlock again"));
+        }
+        assert!(socket.exists(), "no automatic cleanup/restart");
+        assert!(!home.path().join(".akcli/wallets").exists());
+        assert!(!home.path().join(".akcli/config.toml").exists());
     }
 }
 
@@ -160,6 +303,7 @@ fn unsafe_runtime_is_not_absence() {
     .unwrap();
     for args in [
         vec!["wallet", "status"],
+        vec!["wallet", "receive"],
         vec!["wallet", "lock"],
         vec!["wallet", "agent", "stop"],
     ] {

@@ -1,9 +1,10 @@
 # Local encrypted wallets
 
 `akcli wallet` stores named encrypted English BIP39 mnemonics and keeps at most
-one unlocked mnemonic in a private local agent. It does **not** derive keys,
-query funds, sign, produce addresses, or integrate an operational SDK wallet.
-No wallet command contacts an operator.
+one unlocked mnemonic in a private local agent. `wallet receive` asks that agent
+to derive and persist a receive address through the pinned SDK. Only receive
+contacts the configured REST operator. No balance, send, on-chain wallet, sync,
+or complete recovery operation is provided.
 
 ## Commands
 
@@ -14,6 +15,7 @@ No wallet command contacts an operator.
 | `akcli wallet list` | List validated public wallet names without decryption |
 | `akcli wallet unlock <name>` | Prompt for a password, start the agent if absent, and replace its retained wallet on success |
 | `akcli wallet status` | Show running/stopped and locked/unlocked status, plus the public unlocked name |
+| `akcli wallet receive` | Show a receive address for the currently unlocked wallet; reuse index 0, not rotation |
 | `akcli wallet lock` | Forget the agent's retained mnemonic, without stopping the agent |
 | `akcli wallet agent stop` | Stop the agent and forget retained material |
 
@@ -22,12 +24,15 @@ Files live at `$HOME/.akcli/wallets/<name>/<name>.json`. An absolute `HOME` is r
 there is no current-directory fallback. Existing named objects, including empty or
 incomplete directories, block creation without being modified. Legacy flat `*.json`
 files are ignored, not unlocked or migrated; a new same-name directory can coexist
-with an untouched legacy file. No SDK database or metadata placeholders are created.
+with an untouched legacy file. Create/import do not create SDK database or metadata
+placeholders; receive initializes public state only after validation.
 
 Create/import/unlock require `/dev/tty`; piped stdin is not a secret-input
 interface. Name and terminal validation precede secret entry and publication or
 agent startup. Global flags work before or after subcommands. Wallet commands
-ignore `--operator`, `--color`, and the explorer HTTP `--timeout` setting.
+ignore `--color` and the explorer HTTP `--timeout` setting. Receive rejects
+`--operator`: set the persistent top-level `operator` instead. Other wallet commands
+continue to ignore `--operator`.
 `--json` affects only the public result, not interactive terminal prompts.
 
 ## Create and back up
@@ -59,10 +64,8 @@ The phrase is intentionally written only to the controlling terminal, including
 when stdout is redirected or `--json` is used. Keep that terminal private: scrollback,
 terminal recording, screenshots and observers can retain what was displayed.
 
-**The file password is not a BIP39 passphrase.** No seed derivation occurs here;
-the preparatory receive binding fixes an empty BIP39 passphrase independently of
-this encryption password. A
-mnemonic alone is not a guaranteed complete Arkade recovery backup: contract,
+**The file password is not a BIP39 passphrase.** Receive uses an empty BIP39
+passphrase independently of this encryption password. A mnemonic alone is not a guaranteed complete Arkade recovery backup: contract,
 key-index, swap and other state may also matter.
 
 ## Import and unlock
@@ -74,7 +77,7 @@ redisplayed. Import does not unlock or launch the agent.
 
 Unlock prompts only for the file password. Successful unlock replaces the one
 previously retained wallet. A wrong password or failed unlock preserves the
-previous state without extending its expiry. Status and list also never renew
+previous state without extending its expiry. Status, list, and receive never renew
 expiry. Explicit lock and stop apply globally, not to a named wallet.
 
 Status on a proven absent agent returns stopped/locked. Lock and stop then succeed
@@ -93,47 +96,71 @@ idle_timeout_seconds = 600
 ```
 
 The value must be an integer from 1 to 86400; the default is 600 seconds. Unrelated
-operator fields are ignored by this loader. Other wallet commands do not load
-configuration, so a malformed explorer configuration does not prevent locking.
+operator fields are ignored by this loader. Receive separately loads its own
+settings in the daemon; other wallet commands do not load configuration, so a
+malformed explorer configuration does not prevent locking.
 Invalid wallet settings fail unlock with a sanitized diagnostic.
 
 An already running agent keeps its original lease, even if unlock reads changed
 settings. To apply a change, run `akcli wallet agent stop`, wait for shutdown, then
 unlock again. There is no automatic restart. Restarted agents begin locked.
 
-## Receive preparation (R1 only)
+## Receive an address
 
-There is **no `wallet receive` command yet**. The library now provides independent
-receive configuration parsing and private public-state storage preparation; no
-existing command invokes them or creates receive placeholders.
-
-Future receive requests will require both fields in `$HOME/.akcli/config.toml`:
+Set the existing top-level REST `operator` in `$HOME/.akcli/config.toml`
+(before any TOML table headers). For a local operator, for example:
 
 ```toml
-[wallet.receive]
-environment = "regtest"
-grpc_endpoint = "http://localhost:7070"
+operator = "http://localhost:7071"
 ```
 
-Choose the actual environment and gRPC endpoint explicitly; the example is not a
-default. Environments are lowercase `bitcoin`, `testnet`, `testnet4`, `signet`,
-`regtest`, or `mutinynet`. The endpoint is an HTTP/HTTPS authority (at most 2048
-bytes), optionally ending in `/`, with no credentials, query, fragment, or other
-path. Normalization removes the root slash and applies URL host/default-port
-normalization. The receive loader bounds the config file to 64 KiB and never
-falls back to explorer `operator` or mainnet. Diagnostics omit supplied values.
+No `[wallet.receive]`, environment, or gRPC endpoint is required. On first
+initialization, `GET /v1/info` establishes the network; no network is assumed.
 
-Invalid receive field values do not affect the existing idle-timeout loader or
-create/list/unlock/status; malformed TOML still fails any parser reading it.
-The daemon integration will reload receive settings using its existing absolute
-home for each request. Explorer REST configuration remains separate and unchanged.
+Unlock an existing wallet, then request its address:
+
+```sh
+akcli wallet unlock personal
+akcli wallet receive
+# From a source checkout, after unlocking:
+cargo run -- wallet receive
+```
+
+Success prints `Address: <exact SDK address>`; `--json` returns
+`{"address":"<exact SDK address>"}`. Receive takes no name, amount, rotation,
+passphrase, or password argument. It never prompts, starts an agent, automatically
+unlocks, or renews the lease. A missing/locked agent fails without an address or
+implicit wallet creation. Invalid configuration, remote network mismatch, and
+persistence failures also return no address.
+
+An already unlocked older daemon may not support receive. On a protocol error,
+manually run `akcli wallet agent stop`, wait for shutdown, then unlock again with
+the current binary. There is no hidden restart that discards an unlocked session.
+
+The operator URL is an HTTP/HTTPS authority (at most 2048 bytes), optionally
+ending in `/`, without credentials, query, fragment, controls, or other path.
+Normalization removes the root slash and normalizes host/default port. The daemon
+reloads the file from its absolute home for each request, with a 64 KiB bound.
+The REST request has a 10-second timeout within the 25-second server budget.
+Missing operator, invalid config, connection/timeout, HTTP failure, invalid operator
+info, and unsafe/incompatible storage produce static diagnostics without supplied
+values, remote bodies, or URLs. Other wallet settings and explorer flag precedence
+are unchanged; no per-request URL is sent over IPC.
 
 The fixed receive profile uses the pinned SDK's default derivation with an empty
-BIP39 passphrase and owner index 0 (reuse, not rotation). Explicit environment
-identity remains bound in metadata: the SDK's Bitcoin network type cannot
-distinguish Mutinynet from Signet, so future operator checks can only verify that
-network family. Neither signer pinning nor complete imported-wallet recovery is
-promised. See [receive storage preparation](wallet-storage.md#receive-storage-preparation-r1).
+BIP39 passphrase and owner index 0 (reuse, not rotation). The validated raw
+environment from that same REST response remains bound in metadata, preserving
+Mutinynet versus Signet even though typed SDK info collapses them. Repeated requests and restarts reuse index 0; the address can change if
+the operator's signer or policy changes. Neither signer pinning nor complete
+imported-wallet recovery is promised.
+
+The daemon writes unencrypted public `metadata.json` and `contracts.db` beside
+the encrypted wallet file, with owner-only permissions. Metadata binds the
+operator-reported environment, normalized REST URL, and derivation profile; the database
+holds SDK contract state. The contract is persisted before an address is returned.
+Version-1 bindings, changed URLs/environments, and malformed or unsafe storage
+are rejected without migration or rewriting. Do not treat the mnemonic alone as a full recovery backup. See
+[receive storage](wallet-storage.md#receive-storage-preparation-r1).
 
 ## Output and cancellation
 
@@ -171,7 +198,10 @@ checksums and private display, standard help and parse errors, hidden import/pas
 confirmation, all valid import phrase lengths, bounded
 UTF-8 input/editing, duplicate publication, creation acknowledgement/retention,
 cancellation, SIGINT and terminal restoration, no-TTY rejection, independent CLI
-agent calls, replacement/failure, expiry, locking, stopping and restart. Explicit
+agent calls, replacement/failure, expiry, locking, stopping and restart. Receive
+adds local-REST/SDK binary tests for labeled and JSON output, repeat/restart reuse,
+locked/missing agents, invalid configuration, remote network mismatch, and
+malformed/incompatible response rejection without automatic restart. Explicit
 fixture daemons are stopped, waited and reaped, including failure paths.
 
 Execution was exercised on macOS. Linux execution, cross-UID tests and unsupported
