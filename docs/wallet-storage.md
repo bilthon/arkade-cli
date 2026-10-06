@@ -29,7 +29,16 @@ existing CLI is unchanged. Other Unix platforms are not a tested support commitm
 
 ## Storage and encryption
 
-Files live at `<absolute-home>/.akcli/wallets/<name>.json`, with a 16 KiB read bound.
+Files live at `<absolute-home>/.akcli/wallets/<name>/<name>.json`, with a 16 KiB read bound.
+Listing validates each named directory and its expected JSON, returning sorted complete
+wallets. Safe directories missing that JSON are skipped; unsafe objects, unreadable files,
+and malformed or name-mismatched envelopes are errors. Reads never create wallet children.
+Unrelated colocated files (such as future `contracts.db` or `metadata.json`) are ignored;
+creation does not produce placeholders for them.
+
+Legacy top-level `*.json` entries are ignored, never opened, unlocked, migrated, moved,
+or deleted. A new same-name directory may coexist with an untouched legacy flat file.
+There is no migration or backward compatibility.
 The JSON object has exactly `version`, `name`, `profile`, `salt`, `nonce`, and `ciphertext`.
 Duplicate/unknown fields, unsupported versions/profiles, filename/name mismatch, invalid
 base64, and invalid decoded lengths are rejected before running the KDF. No arbitrary
@@ -53,17 +62,25 @@ Names, sizes, timestamps, and the number of wallets remain public metadata.
 Managed path operations are descriptor-relative using `rustix`, with no-follow opens.
 The supplied home is a trusted anchor (its ancestors are not a sandbox). `.akcli` must
 be owned by the effective user and not group/world writable; an existing 0755 directory
-is accepted. `wallets` must be owned and 0700; wallet files must be owned regular files
+is accepted. `wallets` and each wallet child must be owned and 0700;
+wallet files must be owned regular files
 with exactly 0600 permissions. Unsafe existing objects are rejected, never chmodded.
 Nonblocking file opens avoid hanging on special objects before type validation.
 
-Creation writes **only encrypted JSON** to an exclusive 0600 same-directory random
+Creation encrypts before filesystem publication, exclusively creates the named 0700
+child, then syncs the `wallets` parent. Any existing object at that name blocks creation,
+including an empty or incomplete directory; it is never reused, repaired, or removed.
+Inside the child, creation writes **only encrypted JSON** to an exclusive 0600 random
 `.pending-` file. It syncs the file, publishes with an atomic no-overwrite hard link,
-then removes the temporary name and syncs the directory. Duplicate and racing creates
-cannot replace an existing destination. An error after publication may leave a valid
-wallet visible; callers should inspect rather than assume no file was created.
-A crash may leave an encrypted `.pending-` file, which listing ignores; no automatic
-cleanup or plaintext recovery is attempted. Filesystems must support ordinary Unix
+syncs the child, removes the temporary name, and syncs the child again. Duplicate and
+racing creates cannot replace an existing destination.
+
+An error after child creation can leave an incomplete directory that reserves the name;
+listing skips it only if it is safe and its expected JSON is genuinely absent. An error
+after publication may leave a valid wallet visible; callers should inspect rather than
+assume nothing was created. A crash may leave an encrypted `.pending-` file. Listing
+ignores unrelated child files and legacy top-level `.pending-` entries. No recursive
+cleanup, automatic directory removal/reuse, or plaintext recovery is attempted. Filesystems must support ordinary Unix
 permissions, hard links, and directory fsync; network filesystems are not validated.
 
 ## Secret handling is best effort

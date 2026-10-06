@@ -142,11 +142,14 @@ impl WalletStore {
     }
 
     pub fn list(&self) -> Result<Vec<WalletName>, Error> {
-        let names = self.directory.names()?;
-        for name in &names {
-            Envelope::decode(&self.directory.read(name)?, name)?;
+        let mut complete = Vec::new();
+        for name in self.directory.names()? {
+            if let Some(bytes) = self.directory.read(&name)? {
+                Envelope::decode(&bytes, &name)?;
+                complete.push(name);
+            }
         }
-        Ok(names)
+        Ok(complete)
     }
 
     pub fn unlock(&self, name: &WalletName, password: Secret) -> Result<Secret, Error> {
@@ -156,7 +159,8 @@ impl WalletStore {
         if password.expose().is_empty() {
             return Err(Error::EmptyPassword);
         }
-        let (e, decoded) = Envelope::decode(&self.directory.read(name)?, name)?;
+        let bytes = self.directory.read(name)?.ok_or(Error::Storage)?;
+        let (e, decoded) = Envelope::decode(&bytes, name)?;
         let key = key(&password, &decoded.salt)?;
         let mut payload = Zeroizing::new(decoded.ciphertext);
         XChaCha20Poly1305::new((&*key).into())

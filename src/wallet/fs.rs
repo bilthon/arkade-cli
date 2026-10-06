@@ -59,14 +59,26 @@ impl Directory {
         Ok(Self(current))
     }
 
-    pub(super) fn read(&self, name: &WalletName) -> Result<Vec<u8>, Error> {
-        let fd = fs::openat(
-            &self.0,
+    fn child(&self, name: &WalletName) -> Result<Self, Error> {
+        let fd = fs::openat(&self.0, name.as_str(), DIRECTORY, Mode::empty())
+            .map_err(|_| Error::Storage)?;
+        check(&fd, true, false)?;
+        Ok(Self(fd))
+    }
+
+    // Only an absent expected file in a validated directory is incomplete.
+    pub(super) fn read(&self, name: &WalletName) -> Result<Option<Vec<u8>>, Error> {
+        let child = self.child(name)?;
+        let fd = match fs::openat(
+            &child.0,
             format!("{}.json", name.as_str()),
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
-        )
-        .map_err(|_| Error::Storage)?;
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(_) => return Err(Error::Storage),
+        };
         check(&fd, false, false)?;
         let mut bytes = Vec::new();
         File::from(fd)
@@ -76,7 +88,7 @@ impl Directory {
         if bytes.len() > LIMIT {
             return Err(Error::InvalidEnvelope);
         }
-        Ok(bytes)
+        Ok(Some(bytes))
     }
 
     pub(super) fn names(&self) -> Result<Vec<WalletName>, Error> {
@@ -85,10 +97,13 @@ impl Directory {
         for entry in entries {
             let entry = entry.map_err(|_| Error::Storage)?;
             let name = entry.file_name().to_str().map_err(|_| Error::Storage)?;
-            if name == "." || name == ".." || name.starts_with(".pending-") {
+            if name == "."
+                || name == ".."
+                || name.starts_with(".pending-")
+                || name.ends_with(".json")
+            {
                 continue;
             }
-            let name = name.strip_suffix(".json").ok_or(Error::InvalidEnvelope)?;
             names.push(WalletName::new(name).map_err(|_| Error::InvalidEnvelope)?);
         }
         names.sort();
@@ -96,6 +111,19 @@ impl Directory {
     }
 
     pub(super) fn publish(&self, name: &WalletName, bytes: &[u8]) -> Result<(), Error> {
+        // Reserve the name exclusively; never reuse or remove a partial directory.
+        fs::mkdirat(&self.0, name.as_str(), Mode::from_raw_mode(0o700)).map_err(|e| {
+            if e == rustix::io::Errno::EXIST {
+                Error::AlreadyExists
+            } else {
+                Error::Storage
+            }
+        })?;
+        fs::fsync(&self.0).map_err(|_| Error::Storage)?;
+        self.child(name)?.publish_file(name, bytes)
+    }
+
+    fn publish_file(&self, name: &WalletName, bytes: &[u8]) -> Result<(), Error> {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Crypto)?;
         let temporary = format!(".pending-{:032x}", u128::from_le_bytes(random));

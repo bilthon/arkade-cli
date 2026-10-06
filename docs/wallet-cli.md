@@ -18,8 +18,11 @@ No wallet command contacts an operator.
 | `akcli wallet agent stop` | Stop the agent and forget retained material |
 
 Names must match `[a-z0-9][a-z0-9_-]{0,31}`; names are rejected, not normalized.
-Files live at `$HOME/.akcli/wallets/<name>.json`. An absolute `HOME` is required;
-there is no current-directory fallback. Existing names are never overwritten.
+Files live at `$HOME/.akcli/wallets/<name>/<name>.json`. An absolute `HOME` is required;
+there is no current-directory fallback. Existing named objects, including empty or
+incomplete directories, block creation without being modified. Legacy flat `*.json`
+files are ignored, not unlocked or migrated; a new same-name directory can coexist
+with an untouched legacy file. No SDK database or metadata placeholders are created.
 
 Create/import/unlock require `/dev/tty`; piped stdin is not a secret-input
 interface. Name and terminal validation precede secret entry and publication or
@@ -45,7 +48,11 @@ Cancelling at a prompt before saving leaves no new wallet file. Once saving
 starts, cancellation is deferred until it finishes. **After publication the file
 is retained**, even if display fails or backup acknowledgement is cancelled.
 A failed filesystem sync can leave a published file; errors warn that any such
-file is retained. The CLI never deletes a published wallet to undo cancellation.
+file is retained. A storage failure can also leave an incomplete named directory;
+it remains reserved and cannot be retried under the same name. List skips safe
+incomplete directories, but reports unsafe objects or malformed expected JSON.
+There is no automatic cleanup or reuse. The CLI never deletes a published wallet
+to undo cancellation.
 It does not automatically unlock it or offer a stored-phrase export/reveal command.
 
 The phrase is intentionally written only to the controlling terminal, including

@@ -270,7 +270,7 @@ fn import(home: &Path, name: &str) {
 fn hidden_import_and_duplicate_are_safe() {
     let home = home();
     import(home.path(), "first");
-    let path = home.path().join(".akcli/wallets/first.json");
+    let path = home.path().join(".akcli/wallets/first/first.json");
     let original = std::fs::read(&path).unwrap();
     assert!(!original
         .windows(PHRASE.len())
@@ -290,10 +290,10 @@ fn create_publishes_before_display_and_retains_on_cancellation() {
     let mut session = Session::new(home.path(), &["--json", "wallet", "create", "fresh"]);
     session.password();
     session.until("Type yes: ");
-    assert!(!home.path().join(".akcli/wallets/fresh.json").exists());
+    assert!(!home.path().join(".akcli/wallets/fresh").exists());
     session.line("yes");
     session.until("Backup recorded? Type yes: ");
-    assert!(home.path().join(".akcli/wallets/fresh.json").exists());
+    assert!(home.path().join(".akcli/wallets/fresh/fresh.json").exists());
     let text = std::str::from_utf8(&session.transcript).unwrap();
     let phrase = text
         .lines()
@@ -312,7 +312,7 @@ fn create_publishes_before_display_and_retains_on_cancellation() {
             .windows(generated.len())
             .any(|w| w == generated.as_slice()));
     }
-    assert!(home.path().join(".akcli/wallets/fresh.json").exists());
+    assert!(home.path().join(".akcli/wallets/fresh/fresh.json").exists());
     assert!(String::from_utf8_lossy(&stderr).contains("retained"));
 }
 
@@ -320,8 +320,14 @@ fn create_publishes_before_display_and_retains_on_cancellation() {
 fn creation_word_choices_have_english_checksums_and_private_display() {
     for (args, count) in [
         (vec!["wallet", "create", "fresh"], 12),
-        (vec!["wallet", "create", "--words", "12", "fresh", "--json"], 12),
-        (vec!["--json", "wallet", "create", "fresh", "--words", "24"], 24),
+        (
+            vec!["wallet", "create", "--words", "12", "fresh", "--json"],
+            12,
+        ),
+        (
+            vec!["--json", "wallet", "create", "fresh", "--words", "24"],
+            24,
+        ),
     ] {
         let home = home();
         let mut session = Session::new(home.path(), &args);
@@ -331,17 +337,24 @@ fn creation_word_choices_have_english_checksums_and_private_display() {
         session.until("Backup recorded? Type yes: ");
         let text = std::str::from_utf8(&session.transcript).unwrap();
         assert!(text.contains(&format!("Write down this {count}-word phrase privately:")));
-        let phrase = text.lines().find(|line| {
-            line.split_whitespace().count() == count
-                && bip39::Mnemonic::parse_in_normalized(bip39::Language::English, line).is_ok()
-        }).expect("valid English phrase of requested length (transcript suppressed)");
+        let phrase = text
+            .lines()
+            .find(|line| {
+                line.split_whitespace().count() == count
+                    && bip39::Mnemonic::parse_in_normalized(bip39::Language::English, line).is_ok()
+            })
+            .expect("valid English phrase of requested length (transcript suppressed)");
         let generated = Zeroizing::new(phrase.as_bytes().to_vec());
-        let encrypted = std::fs::read(home.path().join(".akcli/wallets/fresh.json")).unwrap();
-        assert!(!encrypted.windows(generated.len()).any(|w| w == generated.as_slice()));
+        let encrypted = std::fs::read(home.path().join(".akcli/wallets/fresh/fresh.json")).unwrap();
+        assert!(!encrypted
+            .windows(generated.len())
+            .any(|w| w == generated.as_slice()));
         session.line("yes");
         let (stdout, stderr) = session.finish(true);
         for bytes in [&stdout, &stderr] {
-            assert!(!bytes.windows(generated.len()).any(|w| w == generated.as_slice()));
+            assert!(!bytes
+                .windows(generated.len())
+                .any(|w| w == generated.as_slice()));
         }
         assert_eq!(status(home.path())["agent"], "stopped");
     }
@@ -361,8 +374,12 @@ fn create_acknowledgement_and_prepublication_cancellation() {
         }
         session.finish(permission == "yes");
         assert_eq!(
+            home.path().join(format!(".akcli/wallets/{name}")).exists(),
+            permission == "yes"
+        );
+        assert_eq!(
             home.path()
-                .join(format!(".akcli/wallets/{name}.json"))
+                .join(format!(".akcli/wallets/{name}/{name}.json"))
                 .exists(),
             permission == "yes"
         );

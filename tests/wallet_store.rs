@@ -47,7 +47,13 @@ fn create_list_unlock_encrypted_mnemonic() {
     let start = std::time::Instant::now();
     assert!(store.unlock(&name, secret("password")).is_ok());
     eprintln!("production-profile unlock elapsed: {:?}", start.elapsed());
-    let disk = std::fs::read_to_string(home.path().join(".akcli/wallets/primary.json")).unwrap();
+    let path = home.path().join(".akcli/wallets/primary/primary.json");
+    assert!(
+        path.is_file(),
+        "wallet JSON must be inside its named directory"
+    );
+    assert!(!home.path().join(".akcli/wallets/primary.json").exists());
+    let disk = std::fs::read_to_string(path).unwrap();
     assert!(!disk.contains("abandon"));
     assert!(!disk.contains("password"));
 }
@@ -64,7 +70,7 @@ fn fixture() -> (
     store
         .create(&name, secret(PHRASE), secret("password"))
         .unwrap();
-    let path = home.path().join(".akcli/wallets/primary.json");
+    let path = home.path().join(".akcli/wallets/primary/primary.json");
     (home, store, name, path)
 }
 
@@ -145,8 +151,13 @@ fn rejects_unbounded_unknown_and_malformed_envelopes() {
 fn copied_wallet_cannot_be_rebound_by_renaming_metadata() {
     let (home, store, _name, path) = fixture();
     let other = WalletName::new("other").unwrap();
-    let other_path = home.path().join(".akcli/wallets/other.json");
+    store
+        .create(&other, secret(PHRASE), secret("password"))
+        .unwrap();
+    let other_path = home.path().join(".akcli/wallets/other/other.json");
+    let other_bytes = std::fs::read(&other_path).unwrap();
     std::fs::copy(&path, &other_path).unwrap();
+    std::fs::write(&path, other_bytes).unwrap();
     assert!(store.list().is_err());
     assert!(store.unlock(&other, secret("password")).is_err());
     let mut changed: Value = serde_json::from_slice(&std::fs::read(&other_path).unwrap()).unwrap();
@@ -208,7 +219,7 @@ fn publication_is_private_randomized_and_never_clobbers() {
         .unwrap();
     let a: Value = serde_json::from_slice(&original).unwrap();
     let b: Value = serde_json::from_slice(
-        &std::fs::read(home.path().join(".akcli/wallets/other.json")).unwrap(),
+        &std::fs::read(home.path().join(".akcli/wallets/other/other.json")).unwrap(),
     )
     .unwrap();
     for field in ["salt", "nonce", "ciphertext"] {
@@ -216,7 +227,7 @@ fn publication_is_private_randomized_and_never_clobbers() {
     }
     assert_eq!(
         std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
-        2
+        1
     );
 }
 
@@ -293,7 +304,7 @@ fn rejects_relative_home_and_unsafe_directory_paths() {
 
 #[test]
 fn rejects_symlink_files_bad_permissions_and_nonregular_objects() {
-    let (home, store, name, path) = fixture();
+    let (_home, store, name, path) = fixture();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(store.list().is_err());
     assert!(store.unlock(&name, secret("password")).is_err());
@@ -301,31 +312,176 @@ fn rejects_symlink_files_bad_permissions_and_nonregular_objects() {
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o644
     );
-    let other = WalletName::new("link").unwrap();
-    symlink(&path, home.path().join(".akcli/wallets/link.json")).unwrap();
-    assert!(store.unlock(&other, secret("password")).is_err());
-    assert!(store
-        .create(&other, secret(PHRASE), secret("password"))
-        .is_err());
-    let directory = WalletName::new("directory").unwrap();
-    std::fs::create_dir(home.path().join(".akcli/wallets/directory.json")).unwrap();
-    assert!(store.unlock(&directory, secret("password")).is_err());
-    let socket = WalletName::new("socket").unwrap();
-    let _listener =
-        std::os::unix::net::UnixListener::bind(home.path().join(".akcli/wallets/socket.json"))
-            .unwrap();
-    assert!(store.unlock(&socket, secret("password")).is_err());
+    // Restore the fixture so each following listing failure tests its own object.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(store.list().is_ok());
+    for kind in ["symlink", "dangling", "directory", "socket"] {
+        let home = tempfile::tempdir().unwrap();
+        let store = WalletStore::open(home.path()).unwrap();
+        let name = WalletName::new("unsafe").unwrap();
+        let child = home.path().join(".akcli/wallets/unsafe");
+        private_dir(&child);
+        let file = child.join("unsafe.json");
+        let _listener = match kind {
+            "symlink" => {
+                symlink(&path, &file).unwrap();
+                None
+            }
+            "dangling" => {
+                symlink(child.join("absent"), &file).unwrap();
+                None
+            }
+            "directory" => {
+                private_dir(&file);
+                None
+            }
+            "socket" => Some(std::os::unix::net::UnixListener::bind(&file).unwrap()),
+            _ => unreachable!(),
+        };
+        assert!(store.list().is_err(), "{kind}");
+        assert!(store.unlock(&name, secret("password")).is_err(), "{kind}");
+    }
 }
 
 #[test]
 fn listing_rejects_unsafe_names_without_exposing_them() {
     let home = tempfile::tempdir().unwrap();
     let store = WalletStore::open(home.path()).unwrap();
-    std::fs::write(home.path().join(".akcli/wallets/UPPER.json"), b"{}").unwrap();
+    std::fs::create_dir(home.path().join(".akcli/wallets/UPPER")).unwrap();
     assert_eq!(
         store.list().err().unwrap().to_string(),
         "invalid wallet envelope"
     );
+}
+
+fn private_dir(path: &std::path::Path) {
+    std::fs::create_dir(path).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn legacy_files_are_ignored_and_same_name_creation_leaves_them_untouched() {
+    let home = tempfile::tempdir().unwrap();
+    let store = WalletStore::open(home.path()).unwrap();
+    let root = home.path().join(".akcli/wallets");
+    let legacy = root.join("primary.json");
+    let bytes = b"legacy bytes deliberately not a valid envelope";
+    std::fs::write(&legacy, bytes).unwrap();
+    symlink(root.join("absent"), root.join("ignored.json")).unwrap();
+    assert!(store.list().unwrap().is_empty());
+    let name = WalletName::new("primary").unwrap();
+    assert!(store.unlock(&name, secret("password")).is_err());
+    assert!(
+        !root.join("primary").exists(),
+        "reads must not create children"
+    );
+    store
+        .create(&name, secret(PHRASE), secret("password"))
+        .unwrap();
+    assert_eq!(store.list().unwrap(), vec![name.clone()]);
+    assert_eq!(
+        store.unlock(&name, secret("password")).unwrap().expose(),
+        PHRASE
+    );
+    assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
+}
+
+#[test]
+fn incomplete_directories_are_skipped_but_reserved_and_colocated_files_are_ignored() {
+    let (home, store, name, path) = fixture();
+    let root = home.path().join(".akcli/wallets");
+    for child in ["empty", "incomplete"] {
+        private_dir(&root.join(child));
+    }
+    std::fs::write(root.join("incomplete/.pending-test"), b"encrypted partial").unwrap();
+    std::fs::write(root.join(".pending-old"), b"ignored old temporary").unwrap();
+    for file in ["contracts.db", "metadata.json", ".pending-test"] {
+        std::fs::write(path.parent().unwrap().join(file), b"unrelated").unwrap();
+    }
+    assert_eq!(store.list().unwrap(), vec![name]);
+    for child in ["empty", "incomplete"] {
+        let name = WalletName::new(child).unwrap();
+        assert_eq!(
+            store
+                .create(&name, secret(PHRASE), secret("password"))
+                .unwrap_err()
+                .to_string(),
+            "wallet already exists"
+        );
+        assert!(store.unlock(&name, secret("password")).is_err());
+    }
+    assert_eq!(std::fs::read_dir(root.join("empty")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read(root.join("incomplete/.pending-test")).unwrap(),
+        b"encrypted partial"
+    );
+    let first = WalletName::new("aaa").unwrap();
+    store
+        .create(&first, secret(PHRASE), secret("password"))
+        .unwrap();
+    assert_eq!(
+        store
+            .list()
+            .unwrap()
+            .iter()
+            .map(WalletName::as_str)
+            .collect::<Vec<_>>(),
+        vec!["aaa", "primary"]
+    );
+}
+
+#[test]
+fn unsafe_wallet_directories_fail_closed_and_cannot_be_reused() {
+    for kind in ["symlink", "file", "socket", "mode"] {
+        let home = tempfile::tempdir().unwrap();
+        let store = WalletStore::open(home.path()).unwrap();
+        let child = home.path().join(".akcli/wallets/unsafe");
+        let target = home.path().join("target");
+        private_dir(&target);
+        let _listener = match kind {
+            "symlink" => {
+                symlink(&target, &child).unwrap();
+                None
+            }
+            "file" => {
+                std::fs::write(&child, b"intact").unwrap();
+                None
+            }
+            "socket" => Some(std::os::unix::net::UnixListener::bind(&child).unwrap()),
+            "mode" => {
+                private_dir(&child);
+                std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+                None
+            }
+            _ => unreachable!(),
+        };
+        let before = std::fs::symlink_metadata(&child)
+            .unwrap()
+            .permissions()
+            .mode();
+        let name = WalletName::new("unsafe").unwrap();
+        assert!(store.list().is_err(), "{kind}");
+        assert!(store.unlock(&name, secret("password")).is_err(), "{kind}");
+        assert_eq!(
+            store
+                .create(&name, secret(PHRASE), secret("password"))
+                .unwrap_err()
+                .to_string(),
+            "wallet already exists",
+            "{kind}"
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(&child)
+                .unwrap()
+                .permissions()
+                .mode(),
+            before
+        );
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        if kind == "file" {
+            assert_eq!(std::fs::read(&child).unwrap(), b"intact");
+        }
+    }
 }
 
 #[test]
