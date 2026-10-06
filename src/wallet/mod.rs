@@ -5,7 +5,11 @@ pub mod agent;
 #[cfg(unix)]
 mod fs;
 #[cfg(unix)]
+mod receive_store;
+#[cfg(unix)]
 mod store;
+#[cfg(unix)]
+pub use receive_store::ReceiveStore;
 #[cfg(unix)]
 pub use store::WalletStore;
 

@@ -59,6 +59,20 @@ impl Directory {
         Ok(Self(current))
     }
 
+    pub(super) fn open_existing_wallet(home: &Path, name: &WalletName) -> Result<Self, Error> {
+        if !home.is_absolute() {
+            return Err(Error::Storage);
+        }
+        let mut current = fs::open(home, DIRECTORY, Mode::empty()).map_err(|_| Error::Storage)?;
+        for (part, parent) in [(".akcli", true), ("wallets", false), (name.as_str(), false)] {
+            let next =
+                fs::openat(&current, part, DIRECTORY, Mode::empty()).map_err(|_| Error::Storage)?;
+            check(&next, true, parent)?;
+            current = next;
+        }
+        Ok(Self(current))
+    }
+
     fn child(&self, name: &WalletName) -> Result<Self, Error> {
         let fd = fs::openat(&self.0, name.as_str(), DIRECTORY, Mode::empty())
             .map_err(|_| Error::Storage)?;
@@ -69,9 +83,13 @@ impl Directory {
     // Only an absent expected file in a validated directory is incomplete.
     pub(super) fn read(&self, name: &WalletName) -> Result<Option<Vec<u8>>, Error> {
         let child = self.child(name)?;
+        child.read_file(&format!("{}.json", name.as_str()))
+    }
+
+    pub(super) fn file(&self, name: &str) -> Result<Option<File>, Error> {
         let fd = match fs::openat(
-            &child.0,
-            format!("{}.json", name.as_str()),
+            &self.0,
+            name,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
@@ -80,9 +98,15 @@ impl Directory {
             Err(_) => return Err(Error::Storage),
         };
         check(&fd, false, false)?;
+        Ok(Some(File::from(fd)))
+    }
+
+    pub(super) fn read_file(&self, name: &str) -> Result<Option<Vec<u8>>, Error> {
+        let Some(file) = self.file(name)? else {
+            return Ok(None);
+        };
         let mut bytes = Vec::new();
-        File::from(fd)
-            .take((LIMIT + 1) as u64)
+        file.take((LIMIT + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|_| Error::Storage)?;
         if bytes.len() > LIMIT {
@@ -120,10 +144,24 @@ impl Directory {
             }
         })?;
         fs::fsync(&self.0).map_err(|_| Error::Storage)?;
-        self.child(name)?.publish_file(name, bytes)
+        self.child(name)?
+            .publish_file(&format!("{}.json", name.as_str()), bytes)
     }
 
-    fn publish_file(&self, name: &WalletName, bytes: &[u8]) -> Result<(), Error> {
+    pub(super) fn create_database(&self) -> Result<(), Error> {
+        let fd = fs::openat(
+            &self.0,
+            "contracts.db",
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|_| Error::Storage)?;
+        check(&fd, false, false)?;
+        fs::fsync(&fd).map_err(|_| Error::Storage)?;
+        fs::fsync(&self.0).map_err(|_| Error::Storage)
+    }
+
+    pub(super) fn publish_file(&self, name: &str, bytes: &[u8]) -> Result<(), Error> {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Crypto)?;
         let temporary = format!(".pending-{:032x}", u128::from_le_bytes(random));
@@ -139,14 +177,7 @@ impl Directory {
             let mut file = File::from(fd);
             file.write_all(bytes).map_err(|_| Error::Storage)?;
             file.sync_all().map_err(|_| Error::Storage)?;
-            fs::linkat(
-                &self.0,
-                &temporary,
-                &self.0,
-                format!("{}.json", name.as_str()),
-                AtFlags::empty(),
-            )
-            .map_err(|e| {
+            fs::linkat(&self.0, &temporary, &self.0, name, AtFlags::empty()).map_err(|e| {
                 if e == rustix::io::Errno::EXIST {
                     Error::AlreadyExists
                 } else {

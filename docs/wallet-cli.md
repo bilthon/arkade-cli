@@ -60,7 +60,8 @@ when stdout is redirected or `--json` is used. Keep that terminal private: scrol
 terminal recording, screenshots and observers can retain what was displayed.
 
 **The file password is not a BIP39 passphrase.** No seed derivation occurs here;
-a future operational wallet must decide passphrase semantics explicitly. A
+the preparatory receive binding fixes an empty BIP39 passphrase independently of
+this encryption password. A
 mnemonic alone is not a guaranteed complete Arkade recovery backup: contract,
 key-index, swap and other state may also matter.
 
@@ -99,6 +100,40 @@ Invalid wallet settings fail unlock with a sanitized diagnostic.
 An already running agent keeps its original lease, even if unlock reads changed
 settings. To apply a change, run `akcli wallet agent stop`, wait for shutdown, then
 unlock again. There is no automatic restart. Restarted agents begin locked.
+
+## Receive preparation (R1 only)
+
+There is **no `wallet receive` command yet**. The library now provides independent
+receive configuration parsing and private public-state storage preparation; no
+existing command invokes them or creates receive placeholders.
+
+Future receive requests will require both fields in `$HOME/.akcli/config.toml`:
+
+```toml
+[wallet.receive]
+environment = "regtest"
+grpc_endpoint = "http://localhost:7070"
+```
+
+Choose the actual environment and gRPC endpoint explicitly; the example is not a
+default. Environments are lowercase `bitcoin`, `testnet`, `testnet4`, `signet`,
+`regtest`, or `mutinynet`. The endpoint is an HTTP/HTTPS authority (at most 2048
+bytes), optionally ending in `/`, with no credentials, query, fragment, or other
+path. Normalization removes the root slash and applies URL host/default-port
+normalization. The receive loader bounds the config file to 64 KiB and never
+falls back to explorer `operator` or mainnet. Diagnostics omit supplied values.
+
+Invalid receive field values do not affect the existing idle-timeout loader or
+create/list/unlock/status; malformed TOML still fails any parser reading it.
+The daemon integration will reload receive settings using its existing absolute
+home for each request. Explorer REST configuration remains separate and unchanged.
+
+The fixed receive profile uses the pinned SDK's default derivation with an empty
+BIP39 passphrase and owner index 0 (reuse, not rotation). Explicit environment
+identity remains bound in metadata: the SDK's Bitcoin network type cannot
+distinguish Mutinynet from Signet, so future operator checks can only verify that
+network family. Neither signer pinning nor complete imported-wallet recovery is
+promised. See [receive storage preparation](wallet-storage.md#receive-storage-preparation-r1).
 
 ## Output and cancellation
 

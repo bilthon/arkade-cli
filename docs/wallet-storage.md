@@ -1,7 +1,8 @@
-# Encrypted mnemonic store (library only)
+# Wallet storage
 
-W1 provides a local encrypted mnemonic store, not a usable wallet CLI. There is no
-agent, wallet command, seed derivation, address generation, or funds support yet.
+The encrypted mnemonic store backs the [local wallet CLI](wallet-cli.md) and agent.
+Receive configuration and storage preparation are library-only (R1); there is no
+receive command, seed derivation, address generation, or funds support yet.
 An encrypted mnemonic backup is **not a guarantee of complete wallet recovery**:
 contract, key-index, and swap state may also be required by future integrations.
 
@@ -25,7 +26,7 @@ On macOS and Linux, use `arkade_cli::wallet`:
 Passwords must be nonempty; there is no additional policy. A file password is **not**
 a BIP39 passphrase. This interface never derives a seed. Store operations are synchronous;
 callers must bound concurrent KDF work. The store is absent from non-Unix builds; the
-existing CLI is unchanged. Other Unix platforms are not a tested support commitment.
+existing wallet CLI behavior is unchanged. Other Unix platforms are not a tested support commitment.
 
 ## Storage and encryption
 
@@ -82,6 +83,51 @@ assume nothing was created. A crash may leave an encrypted `.pending-` file. Lis
 ignores unrelated child files and legacy top-level `.pending-` entries. No recursive
 cleanup, automatic directory removal/reuse, or plaintext recovery is attempted. Filesystems must support ordinary Unix
 permissions, hard links, and directory fsync; network filesystems are not validated.
+
+## Receive storage preparation (R1)
+
+`ReceiveStore::open_existing(home, name)` retains the validated wallet-directory
+descriptor and exposes `database_path()` for later SDK integration. Opening never
+creates missing roots or wallet children. `check_binding(&ReceiveSettings)` reads
+without writes. `initialize(&ReceiveSettings)` rechecks, then writes only receive
+state; callers must validate the operator first. Keep the store alive for the
+future SDK database lifetime. No SQLite dependency or SDK composition is added
+in R1, and no current wallet command calls this API.
+
+`metadata.json` is strict JSON, bounded to 16 KiB, with exactly these fields:
+
+| Field | Value |
+| --- | --- |
+| `version` | `1` |
+| `environment` | Explicit configured environment, including distinct `signet`/`mutinynet` |
+| `grpc_endpoint` | Normalized configured HTTP/HTTPS authority |
+| `derivation_profile` | `sdk65b383e-default-empty-passphrase-index0` |
+
+Unknown/duplicate fields, unsupported versions/profiles, and conflicting bindings
+are rejected without changes. There is no redundant wallet name, custom derivation,
+or signer binding. The profile fixes the SDK's default `m/83696968'/11811'/0`
+derivation with normal owner index 0 and empty BIP39 passphrase. The encryption
+password is unrelated. Operator signer/policy changes may still change an address.
+The SDK network family alone cannot distinguish Mutinynet from Signet.
+
+Metadata uses the existing synced, atomic no-overwrite publication helper.
+Only afterward is `contracts.db` exclusively precreated as an empty 0600 file,
+synced along with its parent. Both state files are unencrypted public state;
+private permissions still apply. Existing metadata, DB, `contracts.db-journal`,
+`contracts.db-wal`, and `contracts.db-shm` must be owned regular 0600 files;
+symlinks, special objects and unsafe modes are rejected, never repaired.
+Database/auxiliary files without metadata are not adopted; auxiliaries without
+a database are also rejected. Matching metadata without a DB is a retryable
+partial initialization. Existing state and mnemonic envelopes are never rewritten
+or automatically cleaned up. Publication/sync errors can leave persistent files.
+
+Managed operations remain descriptor-relative, but the future SDK pathname open
+is **not** race-immune against hostile same-user mutation. R2 must set daemon
+umask 0077 for SQLite auxiliaries and retain/revalidate the storage owner around
+SDK use. No SQLite runtime, operator validation, power-loss durability or
+cross-UID fixture is proven here. Tests cover synthetic temporary homes, bounded
+parsing, binding conflicts, partial retries, no-write checks, no-clobber races,
+unsafe files/directories, and descriptor retention across a directory rename.
 
 ## Secret handling is best effort
 
