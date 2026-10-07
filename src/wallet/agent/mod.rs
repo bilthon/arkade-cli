@@ -8,6 +8,9 @@ mod protocol;
 mod receive;
 #[cfg(unix)]
 mod runtime;
+// S2 removes this gate when preparation/storage consumes the seam.
+#[cfg(test)]
+mod send;
 #[cfg(unix)]
 mod server;
 #[cfg(unix)]
