@@ -23,12 +23,12 @@ anyhow = "1"
 thiserror = "1"
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-ark-core = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567" }
-ark-client = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567", default-features = false, features = ["sqlite"] }
+ark-core = { git = "https://github.com/arkade-os/rust-sdk", rev = "86bed0369ae3d0ab7413a96358e214e39312100b" }
+ark-client = { git = "https://github.com/arkade-os/rust-sdk", rev = "86bed0369ae3d0ab7413a96358e214e39312100b", default-features = false, features = ["sqlite"] }
 bitcoin = "0.32.7"
 bech32 = "0.11"
 base64 = "0.22.1"
-ark-rest = { git = "https://github.com/arkade-os/rust-sdk", rev = "65b383e40c3cf1573a92e87c8950c0a2ff029567" }
+ark-rest = { git = "https://github.com/arkade-os/rust-sdk", rev = "86bed0369ae3d0ab7413a96358e214e39312100b" }
 
 argon2 = { version = "=0.5.3", features = ["zeroize"] }
 chacha20poly1305 = "=0.10.1"

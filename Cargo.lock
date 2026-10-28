@@ -137,7 +137,7 @@ dependencies = [
 [[package]]
 name = "ark-client"
 version = "0.11.0"
-source = "git+https://github.com/arkade-os/rust-sdk?rev=65b383e40c3cf1573a92e87c8950c0a2ff029567#65b383e40c3cf1573a92e87c8950c0a2ff029567"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=86bed0369ae3d0ab7413a96358e214e39312100b#86bed0369ae3d0ab7413a96358e214e39312100b"
 dependencies = [
  "ark-core",
  "ark-delegator",
@@ -177,7 +177,7 @@ dependencies = [
 [[package]]
 name = "ark-core"
 version = "0.11.0"
-source = "git+https://github.com/arkade-os/rust-sdk?rev=65b383e40c3cf1573a92e87c8950c0a2ff029567#65b383e40c3cf1573a92e87c8950c0a2ff029567"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=86bed0369ae3d0ab7413a96358e214e39312100b#86bed0369ae3d0ab7413a96358e214e39312100b"
 dependencies = [
  "bech32",
  "bitcoin",
@@ -198,7 +198,7 @@ dependencies = [
 [[package]]
 name = "ark-delegator"
 version = "0.11.0"
-source = "git+https://github.com/arkade-os/rust-sdk?rev=65b383e40c3cf1573a92e87c8950c0a2ff029567#65b383e40c3cf1573a92e87c8950c0a2ff029567"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=86bed0369ae3d0ab7413a96358e214e39312100b#86bed0369ae3d0ab7413a96358e214e39312100b"
 dependencies = [
  "ark-core",
  "bitcoin",
@@ -211,7 +211,7 @@ dependencies = [
 [[package]]
 name = "ark-fees"
 version = "0.11.0"
-source = "git+https://github.com/arkade-os/rust-sdk?rev=65b383e40c3cf1573a92e87c8950c0a2ff029567#65b383e40c3cf1573a92e87c8950c0a2ff029567"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=86bed0369ae3d0ab7413a96358e214e39312100b#86bed0369ae3d0ab7413a96358e214e39312100b"
 dependencies = [
  "cel",
 ]
@@ -219,7 +219,7 @@ dependencies = [
 [[package]]
 name = "ark-grpc"
 version = "0.11.0"
-source = "git+https://github.com/arkade-os/rust-sdk?rev=65b383e40c3cf1573a92e87c8950c0a2ff029567#65b383e40c3cf1573a92e87c8950c0a2ff029567"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=86bed0369ae3d0ab7413a96358e214e39312100b#86bed0369ae3d0ab7413a96358e214e39312100b"
 dependencies = [
  "ark-core",
  "async-stream",
@@ -237,7 +237,7 @@ dependencies = [
 [[package]]
 name = "ark-rest"
 version = "0.11.0"
-source = "git+https://github.com/arkade-os/rust-sdk?rev=65b383e40c3cf1573a92e87c8950c0a2ff029567#65b383e40c3cf1573a92e87c8950c0a2ff029567"
+source = "git+https://github.com/arkade-os/rust-sdk?rev=86bed0369ae3d0ab7413a96358e214e39312100b#86bed0369ae3d0ab7413a96358e214e39312100b"
 dependencies = [
  "ark-core",
  "base64 0.22.1",
